@@ -5,6 +5,9 @@ import SwiftUI
 final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel: OverlayViewModel
     private let panel: OverlayPanel
+    private var projectPopover: NSPopover?
+    private var chatWindowControllers: [String: ProjectChatWindowController] = [:]
+    private var shouldPresentProjectPickerOnActivate = false
 
     init(viewModel: OverlayViewModel) {
         self.viewModel = viewModel
@@ -34,9 +37,18 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: panel)
         panel.delegate = self
+        hostingView.onActivationClick = { [weak self] in
+            self?.handleOverlayInteraction()
+        }
 
         viewModel.stateDidChange = { [weak self] in
             self?.updateAppearance(animated: true)
+        }
+        viewModel.overlayTapped = { [weak self] in
+            self?.handleOverlayInteraction()
+        }
+        viewModel.filesDropped = { [weak self] urls in
+            self?.handleFilesDropped(urls)
         }
 
         positionInitial()
@@ -54,6 +66,11 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         viewModel.isActive = true
+        guard shouldPresentProjectPickerOnActivate else { return }
+        shouldPresentProjectPickerOnActivate = false
+        DispatchQueue.main.async { [weak self] in
+            self?.presentProjectPickerPopover()
+        }
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -86,6 +103,96 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             panel.alphaValue = targetAlpha
         }
     }
+
+    private func handleFilesDropped(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        Task { [weak self] in
+            await self?.processDroppedFiles(urls)
+        }
+    }
+
+    @MainActor
+    private func processDroppedFiles(_ urls: [URL]) async {
+        panel.makeKeyAndOrderFront(nil)
+        shouldPresentProjectPickerOnActivate = false
+        NSApp.activate(ignoringOtherApps: true)
+
+        do {
+            let project = try await viewModel.backendClient.ensureProjectSelection(
+                preferredProjectID: viewModel.selectedProject?.id
+            )
+            projectPopover?.performClose(nil)
+            openChatWindow(for: project)
+            try await viewModel.backendClient.registerAssets(urls: urls, projectID: project.id)
+        } catch {
+            print("Asset drop handling failed: \(error)")
+        }
+    }
+
+    @MainActor
+    private func handleOverlayInteraction() {
+        if panel.isKeyWindow {
+            presentProjectPickerPopover()
+            return
+        }
+
+        shouldPresentProjectPickerOnActivate = true
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func presentProjectPickerPopover() {
+        if let projectPopover, projectPopover.isShown {
+            return
+        }
+
+        guard let anchorView = panel.contentView else { return }
+
+        let pickerViewModel = ProjectPickerViewModel(
+            client: viewModel.backendClient,
+            selectedProjectID: viewModel.selectedProject?.id
+        )
+        pickerViewModel.onPreferredPopoverSizeChange = { [weak self] size in
+            self?.projectPopover?.contentSize = NSSize(width: size.width, height: size.height)
+        }
+        pickerViewModel.onProjectSelected = { [weak self] project in
+            guard let self else { return }
+            self.viewModel.selectedProject = project
+            self.projectPopover?.performClose(nil)
+            self.openChatWindow(for: project)
+        }
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        let initialSize = pickerViewModel.preferredPopoverSize
+        popover.contentSize = NSSize(width: initialSize.width, height: initialSize.height)
+        popover.contentViewController = NSHostingController(rootView: ProjectPickerView(viewModel: pickerViewModel))
+        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minY)
+        projectPopover = popover
+    }
+
+    @MainActor
+    private func openChatWindow(for project: OverlayProject) {
+        viewModel.selectedProject = project
+
+        if let existing = chatWindowControllers[project.id] {
+            existing.showWindow(nil)
+            existing.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let controller = ProjectChatWindowController(project: project, backendClient: viewModel.backendClient)
+        controller.onWindowClosed = { [weak self] projectID in
+            self?.chatWindowControllers.removeValue(forKey: projectID)
+        }
+        chatWindowControllers[project.id] = controller
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 final class OverlayPanel: NSPanel {
@@ -95,11 +202,31 @@ final class OverlayPanel: NSPanel {
 
 final class DraggableHostingView<Content: View>: NSHostingView<Content> {
     private var initialLocation: NSPoint = .zero
+    var onActivationClick: (() -> Void)?
+
+    required init(rootView: Content) {
+        onActivationClick = nil
+        super.init(rootView: rootView)
+    }
+
+    convenience init(rootView: Content, onActivationClick: (() -> Void)? = nil) {
+        self.init(rootView: rootView)
+        self.onActivationClick = onActivationClick
+    }
+
+    required init?(coder: NSCoder) {
+        onActivationClick = nil
+        super.init(coder: coder)
+    }
 
     override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
+        let wasKeyWindow = window?.isKeyWindow ?? false
         initialLocation = event.locationInWindow
-        window?.makeKey()
+        window?.makeKeyAndOrderFront(nil)
+        if !wasKeyWindow {
+            onActivationClick?()
+        }
+        super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {

@@ -13,12 +13,25 @@ final class OverlayViewModel: ObservableObject {
         didSet { stateDidChange?() }
     }
     @Published var lastDroppedFiles: [URL] = []
+    @Published var selectedProject: OverlayProject?
 
     let backendClient = BackendClient()
     var stateDidChange: (() -> Void)?
+    var overlayTapped: (() -> Void)?
+    var filesDropped: (([URL]) -> Void)?
 
     var isEngaged: Bool {
         isHovered || isDragTarget || isActive
+    }
+
+    func handleOverlayTap() {
+        overlayTapped?()
+    }
+
+    func handleDroppedFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        lastDroppedFiles = urls
+        filesDropped?(urls)
     }
 }
 
@@ -43,8 +56,12 @@ struct OverlayRootView: View {
             }
         }
         .frame(width: 96, height: 96)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onHover { hover in
             viewModel.isHovered = hover
+        }
+        .onTapGesture {
+            viewModel.handleOverlayTap()
         }
         .onDrop(of: [UTType.fileURL], delegate: FileDropDelegate(viewModel: viewModel))
     }

@@ -50,10 +50,7 @@ final class FileDropDelegate: DropDelegate {
 
         group.notify(queue: .main) { [weak viewModel] in
             guard let viewModel else { return }
-            guard !urls.isEmpty else { return }
-
-            viewModel.lastDroppedFiles = urls
-            viewModel.backendClient.registerAssets(urls: urls)
+            viewModel.handleDroppedFiles(urls)
         }
 
         return true
