@@ -48,7 +48,16 @@ Stash is a macOS menu bar app that lets you quickly capture PDFs, notes, questio
 - Fast: overlay appears instantly, results stream quickly
 
 ## Status
-This repo is a placeholder for the project. No code yet.
+Backend foundation is now implemented under `backend-service/`:
+
+- FastAPI local service on `localhost`
+- Folder-scoped project state in `.stash/` for portable resume/history
+- SQLite metadata + conversations/runs/events
+- Local vector indexing/search
+- Background file watching/indexing
+- Tagged Codex command execution in controlled worktrees
+
+See `backend-service/README.md` for setup and API usage.
 
 ## License
 TBD

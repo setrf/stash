@@ -1,0 +1,10 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local virtual environments
+.venv/
+backend-service/.venv/
+
+# Local project runtime state
+.stash/
