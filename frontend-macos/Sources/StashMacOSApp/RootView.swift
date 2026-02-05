@@ -229,6 +229,12 @@ private struct ChatPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
+            if viewModel.runInProgress || viewModel.runThinkingText != nil || !viewModel.runTodos.isEmpty {
+                RunFeedbackCard(viewModel: viewModel)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 8)
+            }
+
             if let errorText = viewModel.errorText {
                 Text(errorText)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -241,12 +247,23 @@ private struct ChatPanel: View {
             Divider()
 
             VStack(spacing: 10) {
+                if !viewModel.mentionedFilePaths.isEmpty {
+                    MentionedFilesStrip(paths: viewModel.mentionedFilePaths)
+                }
+
+                if !viewModel.mentionSuggestions.isEmpty {
+                    MentionSuggestionsList(viewModel: viewModel)
+                }
+
                 TextEditor(text: $viewModel.composerText)
                     .font(.system(size: 13, weight: .regular, design: .rounded))
                     .frame(minHeight: 96, maxHeight: 140)
                     .padding(6)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(CodexTheme.border, lineWidth: 1))
+                    .onChange(of: viewModel.composerText) { _, _ in
+                        viewModel.composerDidChange()
+                    }
 
                 HStack {
                     Text(viewModel.runInProgress ? "Running..." : "Ready")
@@ -263,6 +280,137 @@ private struct ChatPanel: View {
             .padding(18)
             .background(CodexTheme.panel)
         }
+    }
+}
+
+private struct RunFeedbackCard: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Agent Feedback")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+
+            if let runThinkingText = viewModel.runThinkingText {
+                Text("Thinking: \(runThinkingText)")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.textPrimary)
+            }
+
+            if let runPlanningText = viewModel.runPlanningText {
+                Text("Planning: \(runPlanningText)")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.textPrimary)
+            }
+
+            if !viewModel.runTodos.isEmpty {
+                Text("Todos")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(CodexTheme.textSecondary)
+
+                ForEach(viewModel.runTodos) { todo in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(todoMarker(for: todo.status))
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                        Text(todo.title)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(CodexTheme.textPrimary)
+                            .lineLimit(2)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+        )
+    }
+
+    private func todoMarker(for status: String) -> String {
+        switch status.lowercased() {
+        case "completed":
+            return "✓"
+        case "running":
+            return "…"
+        case "failed":
+            return "!"
+        default:
+            return "•"
+        }
+    }
+}
+
+private struct MentionedFilesStrip: View {
+    let paths: [String]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(paths, id: \.self) { path in
+                    Text("@\(path)")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(CodexTheme.accent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule().fill(CodexTheme.accent.opacity(0.12))
+                        )
+                        .overlay(
+                            Capsule().stroke(CodexTheme.accent.opacity(0.35), lineWidth: 1)
+                        )
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MentionSuggestionsList: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Mention a file")
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+
+            ForEach(viewModel.mentionSuggestions.prefix(6)) { suggestion in
+                Button {
+                    viewModel.applyMentionSuggestion(suggestion)
+                } label: {
+                    HStack {
+                        Image(systemName: "at")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(CodexTheme.accent)
+                        Text(suggestion.relativePath)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundStyle(CodexTheme.textPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.white)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(CodexTheme.border.opacity(0.8), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

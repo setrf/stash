@@ -84,11 +84,15 @@ Codex CLI integration test (mocked Codex binary, full planner+executor API path)
 - `STASH_CODEX_BIN` (default `codex`)
 - `STASH_PLANNER_CMD` (optional external planner command)
 - `STASH_PLANNER_TIMEOUT_SECONDS` (default `150`)
+- `STASH_OPENAI_API_KEY` (or `OPENAI_API_KEY`, enables GPT planner)
+- `STASH_OPENAI_MODEL` (default `gpt-5-mini`)
+- `STASH_OPENAI_BASE_URL` (default `https://api.openai.com/v1`)
+- `STASH_OPENAI_TIMEOUT_SECONDS` (default `60`)
 - `STASH_LOG_LEVEL` (default `INFO`)
 
 ## Notes
 
-- If `STASH_PLANNER_CMD` is unset, planner defaults to Codex CLI planning (`codex exec` in read-only mode).
+- Planning chain is: `STASH_PLANNER_CMD` (if set) -> OpenAI GPT planner (if API key is set) -> Codex CLI planner.
 - Ensure local auth is ready: `codex login status` should report logged in.
 - Tagged command protocol is still supported directly for explicit runs.
 - The vector index uses local hashed embeddings by default, so no cloud dependency is required for search.

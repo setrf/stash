@@ -20,6 +20,11 @@ final class AppViewModel: ObservableObject {
     @Published var runStatusText: String?
     @Published var runInProgress = false
     @Published var indexingStatusText: String?
+    @Published var runThinkingText: String?
+    @Published var runPlanningText: String?
+    @Published var runTodos: [RunTodo] = []
+    @Published var mentionSuggestions: [FileItem] = []
+    @Published var mentionedFilePaths: [String] = []
 
     @Published var errorText: String?
 
@@ -32,6 +37,8 @@ final class AppViewModel: ObservableObject {
     private var isPresentingProjectPicker = false
     private let filePollInterval: Duration = .seconds(2)
     private let changeIndexCooldownSeconds: TimeInterval = 4
+    private let maxMentionedFiles = 6
+    private let maxMentionExcerptChars = 3500
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
     private var client: BackendClient
@@ -58,6 +65,22 @@ final class AppViewModel: ObservableObject {
             $0.relativePath.localizedCaseInsensitiveContains(trimmed) ||
                 $0.name.localizedCaseInsensitiveContains(trimmed)
         }
+    }
+
+    func composerDidChange() {
+        refreshMentionState()
+    }
+
+    func applyMentionSuggestion(_ item: FileItem) {
+        guard !item.isDirectory else { return }
+
+        let replacement = "@\(item.relativePath) "
+        if let range = composerText.range(of: "@[^\\s]*$", options: .regularExpression) {
+            composerText.replaceSubrange(range, with: replacement)
+        } else {
+            composerText = composerText + (composerText.hasSuffix(" ") || composerText.isEmpty ? "" : " ") + replacement
+        }
+        refreshMentionState()
     }
 
     func bootstrap() async {
@@ -110,9 +133,13 @@ final class AppViewModel: ObservableObject {
             let opened = try await client.createOrOpenProject(name: url.lastPathComponent, rootPath: url.path)
             project = opened
             projectRootURL = url
+            runThinkingText = nil
+            runPlanningText = nil
+            runTodos = []
             defaults.set(url.path, forKey: lastProjectPathKey)
 
             await refreshFiles(force: true, triggerChangeIndex: false)
+            refreshMentionState()
             startFilePolling()
             await refreshConversations()
             await autoIndexCurrentProject()
@@ -209,6 +236,7 @@ final class AppViewModel: ObservableObject {
 
         files = scanned
         lastFileSignature = signature
+        refreshMentionState()
 
         guard triggerChangeIndex, hadPreviousSnapshot else { return }
         await autoIndexCurrentProject(fullScan: false, statusText: "New files detected. Re-indexing...")
@@ -258,6 +286,144 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func refreshMentionState() {
+        let mentioned = resolveMentionedFiles(from: composerText)
+        mentionedFilePaths = mentioned.map(\.relativePath)
+
+        guard let query = currentMentionQuery(from: composerText) else {
+            mentionSuggestions = []
+            return
+        }
+
+        let normalized = query.lowercased()
+        mentionSuggestions = files
+            .filter { !$0.isDirectory }
+            .filter {
+                $0.relativePath.lowercased().contains(normalized) ||
+                    $0.name.lowercased().contains(normalized)
+            }
+            .prefix(8)
+            .map { $0 }
+    }
+
+    private func currentMentionQuery(from text: String) -> String? {
+        guard let token = text.split(whereSeparator: \.isWhitespace).last else {
+            return nil
+        }
+        let last = String(token)
+        guard last.hasPrefix("@"), last.count > 1 else {
+            return nil
+        }
+        return String(last.dropFirst())
+    }
+
+    private func extractMentionTokens(from text: String) -> [String] {
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        guard let regex = try? NSRegularExpression(pattern: "@([A-Za-z0-9_./\\-]+)") else {
+            return []
+        }
+        return regex.matches(in: text, options: [], range: nsRange).compactMap {
+            guard $0.numberOfRanges > 1, let range = Range($0.range(at: 1), in: text) else {
+                return nil
+            }
+            return String(text[range])
+        }
+    }
+
+    private func resolveMentionedFiles(from text: String) -> [FileItem] {
+        var ordered: [FileItem] = []
+        var seen = Set<String>()
+        let tokens = extractMentionTokens(from: text)
+
+        for token in tokens {
+            let exactPath = files.first { !$0.isDirectory && $0.relativePath == token }
+            let resolved: FileItem?
+
+            if let exactPath {
+                resolved = exactPath
+            } else {
+                let byName = files.filter { !$0.isDirectory && $0.name == token }
+                if byName.count == 1 {
+                    resolved = byName[0]
+                } else {
+                    let suffixMatches = files.filter {
+                        !$0.isDirectory &&
+                            ($0.relativePath.hasSuffix("/" + token) || $0.relativePath == token)
+                    }
+                    resolved = suffixMatches.count == 1 ? suffixMatches[0] : nil
+                }
+            }
+
+            if let resolved, !seen.contains(resolved.relativePath) {
+                ordered.append(resolved)
+                seen.insert(resolved.relativePath)
+            }
+        }
+        return Array(ordered.prefix(maxMentionedFiles))
+    }
+
+    private func buildMentionParts(from text: String) -> [[String: String]] {
+        guard let projectRootURL else {
+            return []
+        }
+
+        let mentionedFiles = resolveMentionedFiles(from: text)
+        guard !mentionedFiles.isEmpty else {
+            return []
+        }
+
+        var parts: [[String: String]] = []
+        for item in mentionedFiles {
+            let fileURL = projectRootURL.appendingPathComponent(item.relativePath)
+            guard let data = try? Data(contentsOf: fileURL) else {
+                continue
+            }
+            if data.contains(0) {
+                parts.append(
+                    [
+                        "type": "file_context",
+                        "path": item.relativePath,
+                        "excerpt": "[binary file omitted]",
+                    ]
+                )
+                continue
+            }
+            var textContent = String(decoding: data, as: UTF8.self)
+            if textContent.count > maxMentionExcerptChars {
+                textContent = String(textContent.prefix(maxMentionExcerptChars)) + "\n... (truncated)"
+            }
+            parts.append(
+                [
+                    "type": "file_context",
+                    "path": item.relativePath,
+                    "excerpt": textContent,
+                ]
+            )
+        }
+        return parts
+    }
+
+    private func updateRunFeedback(run: RunDetail) {
+        let steps = run.steps ?? []
+        if run.status.lowercased() == "running" {
+            runThinkingText = "Thinking and planning..."
+        } else if ["done", "failed", "cancelled"].contains(run.status.lowercased()) {
+            runThinkingText = nil
+        }
+
+        if steps.isEmpty {
+            runPlanningText = run.status.lowercased() == "running" ? "Planning next actions..." : nil
+            runTodos = []
+            return
+        }
+
+        runPlanningText = "Planned \(steps.count) step(s)"
+        runTodos = steps.map { step in
+            let command = step.input["cmd"]?.stringValue ?? step.stepType
+            return RunTodo(id: step.id, title: command, status: step.status)
+        }
+    }
+
     func sendComposerMessage() async {
         let content = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
@@ -279,12 +445,31 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        let mentionParts = buildMentionParts(from: content)
+        runThinkingText = "Thinking and planning..."
+        runPlanningText = "Planning next actions..."
+        runTodos = []
+        let optimisticID = "local-\(UUID().uuidString)"
+        let optimisticMessage = Message(
+            id: optimisticID,
+            projectId: projectID,
+            conversationId: conversationID,
+            role: "user",
+            content: content,
+            parentMessageId: nil,
+            sequenceNo: (messages.last?.sequenceNo ?? 0) + 1,
+            createdAt: ISO8601DateFormatter().string(from: Date())
+        )
+        messages.append(optimisticMessage)
+
         do {
             composerText = ""
+            refreshMentionState()
             let status = try await client.sendMessage(
                 projectID: projectID,
                 conversationID: conversationID,
                 content: content,
+                parts: mentionParts,
                 startRun: true,
                 mode: "manual"
             )
@@ -297,6 +482,9 @@ final class AppViewModel: ObservableObject {
             await refreshConversations()
             errorText = nil
         } catch {
+            messages.removeAll { $0.id == optimisticID }
+            composerText = content
+            refreshMentionState()
             errorText = "Could not send message: \(error.localizedDescription)"
         }
     }
@@ -320,6 +508,7 @@ final class AppViewModel: ObservableObject {
                     let run = try await self.client.run(projectID: projectID, runID: runID)
                     await MainActor.run {
                         self.runStatusText = "Run \(run.status)"
+                        self.updateRunFeedback(run: run)
                     }
 
                     if ["done", "failed", "cancelled"].contains(run.status.lowercased()) {
@@ -331,6 +520,9 @@ final class AppViewModel: ObservableObject {
                     }
                 } catch {
                     await MainActor.run {
+                        self.runThinkingText = nil
+                        self.runPlanningText = nil
+                        self.runTodos = []
                         self.errorText = "Run polling failed: \(error.localizedDescription)"
                     }
                     return
@@ -341,6 +533,7 @@ final class AppViewModel: ObservableObject {
 
             await MainActor.run {
                 self.runStatusText = "Run timed out"
+                self.runThinkingText = nil
             }
         }
     }

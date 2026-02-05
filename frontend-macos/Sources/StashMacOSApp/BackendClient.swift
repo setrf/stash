@@ -79,12 +79,14 @@ struct BackendClient {
         projectID: String,
         conversationID: String,
         content: String,
+        parts: [[String: String]],
         startRun: Bool,
         mode: String
     ) async throws -> TaskStatus {
         struct Payload: Encodable {
             let role: String
             let content: String
+            let parts: [[String: String]]
             let startRun: Bool
             let mode: String
         }
@@ -92,7 +94,7 @@ struct BackendClient {
         return try await request(
             path: "/v1/projects/\(projectID)/conversations/\(conversationID)/messages",
             method: "POST",
-            body: Payload(role: "user", content: content, startRun: startRun, mode: mode)
+            body: Payload(role: "user", content: content, parts: parts, startRun: startRun, mode: mode)
         )
     }
 

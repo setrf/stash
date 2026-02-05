@@ -74,6 +74,8 @@ This does a single local setup for the stack:
 - Writes `.env.local` with:
   - `STASH_BACKEND_URL=http://127.0.0.1:8765`
   - `STASH_CODEX_MODE=cli`
+  - `STASH_OPENAI_MODEL=gpt-5-mini`
+  - Optional `STASH_OPENAI_API_KEY` placeholder for GPT planning
 - Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 
 Run commands:

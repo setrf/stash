@@ -20,12 +20,16 @@ def resolve_binary(binary: str) -> str | None:
 
 def codex_integration_status(settings: Settings) -> dict[str, Any]:
     resolved = resolve_binary(settings.codex_bin)
+    openai_enabled = bool(settings.openai_api_key and settings.openai_model)
     status: dict[str, Any] = {
         "codex_mode": settings.codex_mode,
         "codex_bin": settings.codex_bin,
         "codex_bin_resolved": resolved,
         "codex_available": resolved is not None,
         "planner_cmd_configured": bool(settings.planner_cmd),
+        "openai_planner_configured": openai_enabled,
+        "openai_model": settings.openai_model if openai_enabled else None,
+        "openai_base_url": settings.openai_base_url if openai_enabled else None,
     }
 
     if settings.codex_mode != "cli":
@@ -60,4 +64,3 @@ def codex_integration_status(settings: Settings) -> dict[str, Any]:
     status["detail"] = raw[:1000]
     status["login_exit_code"] = int(proc.returncode)
     return status
-

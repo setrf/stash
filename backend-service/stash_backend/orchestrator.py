@@ -26,6 +26,35 @@ class RunOrchestrator:
         self.codex = codex
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
+    def _compose_planner_user_message(self, trigger_message: dict[str, Any]) -> str:
+        content = str(trigger_message.get("content", "")).strip()
+        parts = trigger_message.get("parts") or []
+        if not isinstance(parts, list):
+            return content
+
+        file_blocks: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            if str(part.get("type", "")) != "file_context":
+                continue
+            path = str(part.get("path", "")).strip()
+            excerpt = str(part.get("excerpt", "")).strip()
+            if not path and not excerpt:
+                continue
+            block = f"File: {path or '(unknown)'}\n{excerpt}" if excerpt else f"File: {path}"
+            file_blocks.append(block[:5000])
+
+        if not file_blocks:
+            return content
+
+        return (
+            f"{content}\n\n"
+            "[Mentioned file context]\n"
+            + "\n\n".join(file_blocks[:6])
+            + "\n[/Mentioned file context]"
+        ).strip()
+
     def start_run(self, *, project_id: str, conversation_id: str, trigger_message_id: str, mode: str) -> dict[str, Any]:
         context = self.project_store.get(project_id)
         if context is None:
@@ -89,8 +118,9 @@ class RunOrchestrator:
 
             history = repo.list_messages(conversation_id, cursor=None, limit=500)
             skills = load_skill_bundle(context.stash_dir)
+            planner_user_message = self._compose_planner_user_message(trigger_msg)
             plan = self.planner.plan(
-                user_message=trigger_msg["content"],
+                user_message=planner_user_message,
                 conversation_history=history,
                 skill_bundle=skills,
                 project_summary=repo.project_view(),
@@ -100,6 +130,17 @@ class RunOrchestrator:
                 run_id,
                 len(plan.commands),
             )
+            with context.lock:
+                repo.add_event(
+                    "run_planned",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    payload={
+                        "command_count": len(plan.commands),
+                        "planner_preview": plan.planner_text[:1200],
+                        "commands": [command.cmd for command in plan.commands[:12]],
+                    },
+                )
 
             tool_summaries: list[str] = []
             failures = 0

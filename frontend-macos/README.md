@@ -17,6 +17,14 @@ Codex-style light-mode desktop UI for Stash.
 - Conversation switcher and message timeline
 - Composer to send work requests to backend
 - Run polling and status display
+- Optimistic user messages (your sent message appears immediately)
+- Live run feedback panel:
+  - Thinking status
+  - Planning summary
+  - Todo list from run steps as they execute
+- `@file` mentions in composer:
+  - Type `@` to get file suggestions from current project
+  - Mentioned files are attached as structured file context parts for planning
 
 ## Backend integration
 
