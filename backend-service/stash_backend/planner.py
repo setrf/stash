@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 import re
 import shlex
 import subprocess
@@ -58,10 +57,6 @@ READ_HINT_KEYWORDS = (
     "analyze",
     "review",
 )
-FILE_OUTPUT_ACTION_KEYWORDS = ("create", "save", "export", "write", "generate")
-FILE_OUTPUT_OBJECT_KEYWORDS = ("file", "document", "doc", "report", "spreadsheet", "sheet", "ppt", "presentation")
-FILE_OUTPUT_EXTENSIONS = (".txt", ".md", ".csv", ".docx", ".xlsx", ".pdf", ".pptx")
-FALLBACK_WRITABLE_EXTENSIONS = {".txt", ".md", ".csv"}
 
 FILE_REF_RE = re.compile(r"(?<![\w./~-])(?:~|/)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,12}")
 CODEX_CMD_BLOCK_RE = re.compile(r"<codex_cmd(?:\s+[^>]*)?>[\s\S]*?</codex_cmd>", flags=re.IGNORECASE)
@@ -298,14 +293,6 @@ class Planner:
             cmd = str(item.get("cmd", ""))
             cmd_lower = cmd.lower()
             step_index = int(item.get("step_index") or 0)
-            stdout_lower = stdout[:1200].lower()
-
-            # Avoid internal project-history/system files unless explicitly requested.
-            if "stash_history.md" in cmd_lower or ".stash/" in cmd_lower:
-                if "history" not in user_message.lower():
-                    continue
-            if "stash project history" in stdout_lower and "history" not in user_message.lower():
-                continue
 
             score = 0
             if requested_paths and any(path in cmd_lower for path in requested_paths):
@@ -325,68 +312,6 @@ class Planner:
                 best = (score, step_index, item)
 
         return best[2] if best else None
-
-    def _requests_file_output(self, user_message: str) -> bool:
-        lowered = user_message.lower()
-        if "output file" in lowered or "save as" in lowered:
-            return True
-        has_action = any(keyword in lowered for keyword in FILE_OUTPUT_ACTION_KEYWORDS)
-        if not has_action:
-            return False
-        has_output_object = any(keyword in lowered for keyword in FILE_OUTPUT_OBJECT_KEYWORDS)
-        has_extension = any(ext in lowered for ext in FILE_OUTPUT_EXTENSIONS)
-        return has_output_object or has_extension
-
-    def _infer_fallback_output_relpath(self, user_message: str) -> str:
-        requested = self._extract_requested_paths(user_message)
-        for candidate in reversed(requested):
-            cleaned = candidate.strip().strip("`\"'")
-            suffix = Path(cleaned).suffix.lower()
-            if suffix in FALLBACK_WRITABLE_EXTENSIONS:
-                return cleaned
-
-        lowered = user_message.lower()
-        if ".md" in lowered or "markdown" in lowered:
-            return "summary.md"
-        if ".csv" in lowered or "spreadsheet" in lowered:
-            return "summary.csv"
-        return "summary.txt"
-
-    def _safe_write_fallback_output_file(
-        self,
-        *,
-        user_message: str,
-        project_summary: dict[str, Any],
-        content: str,
-    ) -> str | None:
-        root_raw = str(project_summary.get("root_path") or "").strip()
-        if not root_raw:
-            return None
-        root = Path(root_raw).expanduser().resolve()
-        if not root.exists() or not root.is_dir():
-            return None
-
-        rel = self._infer_fallback_output_relpath(user_message)
-        target = (root / rel).resolve() if not Path(rel).is_absolute() else Path(rel).expanduser().resolve()
-        if not str(target).startswith(str(root) + "/") and target != root:
-            return None
-        if target.suffix.lower() not in FALLBACK_WRITABLE_EXTENSIONS:
-            target = target.with_suffix(".txt")
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            stem = target.stem
-            suffix = target.suffix
-            parent = target.parent
-            for index in range(1, 1000):
-                candidate = parent / f"{stem}-{index}{suffix}"
-                if not candidate.exists():
-                    target = candidate
-                    break
-
-        payload = content.strip() or "No content generated."
-        target.write_text(payload + ("\n" if not payload.endswith("\n") else ""), encoding="utf-8")
-        return str(target.relative_to(root))
 
     def _naive_bullet_summary(self, text: str, *, max_bullets: int = 5) -> str:
         normalized = text.replace("\r\n", "\n").strip()
@@ -417,44 +342,12 @@ class Planner:
         fallback = re.sub(r"\s+", " ", fallback)
         return f"- {fallback[:260]}"
 
-    def _local_tool_response_fallback(
-        self,
-        *,
-        user_message: str,
-        tool_results: list[dict[str, Any]],
-        project_summary: dict[str, Any],
-        output_files: list[str] | None = None,
-    ) -> str | None:
+    def _local_tool_response_fallback(self, *, user_message: str, tool_results: list[dict[str, Any]]) -> str | None:
         if not tool_results:
             return None
 
-        normalized_output_files = [path.strip() for path in (output_files or []) if path.strip()]
         failures = [item for item in tool_results if int(item.get("exit_code") or 0) != 0]
         selected = self._pick_output_candidate(user_message=user_message, tool_results=tool_results)
-        requests_file_output = self._requests_file_output(user_message)
-
-        if requests_file_output:
-            if normalized_output_files:
-                tags = "\n".join(f"- <stash_file>{path}</stash_file>" for path in normalized_output_files[:10])
-                return "Created output file(s):\n" + tags
-            if selected:
-                stdout = str(selected.get("stdout", "")).strip()
-                if stdout:
-                    fallback_rel = self._safe_write_fallback_output_file(
-                        user_message=user_message,
-                        project_summary=project_summary,
-                        content=stdout,
-                    )
-                    if fallback_rel:
-                        return f"Created output file(s):\n- <stash_file>{fallback_rel}</stash_file>"
-            if failures:
-                first_failure = failures[0]
-                failure_detail = str(first_failure.get("stderr") or "").strip() or "Command failed without stderr output."
-                return (
-                    "I ran the commands but could not produce the requested output file.\n"
-                    f"Failure: {failure_detail[:500]}"
-                )
-            return "I ran the commands, but I could not detect a created output file from this run."
 
         if not selected:
             if failures:
@@ -688,12 +581,7 @@ class Planner:
             if cleaned:
                 return self._append_output_file_tags(cleaned, normalized_output_files)
 
-        fallback = self._local_tool_response_fallback(
-            user_message=user_message,
-            tool_results=tool_results,
-            project_summary=project_summary,
-            output_files=normalized_output_files,
-        )
+        fallback = self._local_tool_response_fallback(user_message=user_message, tool_results=tool_results)
         if fallback:
             cleaned_fallback = self.sanitize_assistant_text(fallback)
             return self._append_output_file_tags(cleaned_fallback, normalized_output_files)
@@ -1281,6 +1169,11 @@ class Planner:
                 result.timed_out_primary = timed_out_primary or result.timed_out_primary
                 return result
 
+        heuristic = self._heuristic_read_plan(user_message=user_message, project_summary=project_summary)
+        if heuristic is not None:
+            heuristic.timed_out_primary = timed_out_primary
+            return heuristic
+
         if runtime.planner_backend == "openai_api" and not self._openai_available(runtime=runtime):
             fallback_hint = "Open AI setup and add your OpenAI API key."
         elif not self._codex_available(runtime=runtime) and not self._openai_available(runtime=runtime):
@@ -1288,7 +1181,7 @@ class Planner:
         elif not self._codex_available(runtime=runtime):
             fallback_hint = "Verify Codex CLI installation and login in AI setup."
         else:
-            fallback_hint = "Codex/OpenAI planner did not return runnable commands. Try again or rephrase with explicit output instructions."
+            fallback_hint = "Try again or rephrase the request."
 
         fallback = f"Planner fallback: could not generate an execution plan. {fallback_hint}"
         logger.error("Planner fallback reached: no commands generated")

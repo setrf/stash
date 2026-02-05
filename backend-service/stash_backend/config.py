@@ -21,8 +21,6 @@ class Settings:
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 60
     planner_mode: str = "fast"
-    execution_mode: str = "execute"
-    direct_run_timeout_seconds: int = 30
     execution_parallel_reads_enabled: bool = True
     execution_parallel_reads_max_workers: int = 3
     openai_api_key: str | None = None
@@ -50,8 +48,6 @@ def load_settings() -> Settings:
         planner_cmd=os.getenv("STASH_PLANNER_CMD"),
         planner_timeout_seconds=int(os.getenv("STASH_PLANNER_TIMEOUT_SECONDS", "60")),
         planner_mode=os.getenv("STASH_PLANNER_MODE", "fast").strip().lower(),
-        execution_mode=os.getenv("STASH_EXECUTION_MODE", "execute").strip().lower(),
-        direct_run_timeout_seconds=int(os.getenv("STASH_DIRECT_RUN_TIMEOUT_SECONDS", "30")),
         execution_parallel_reads_enabled=os.getenv("STASH_EXECUTION_PARALLEL_READS_ENABLED", "true").strip().lower() != "false",
         execution_parallel_reads_max_workers=int(os.getenv("STASH_EXECUTION_PARALLEL_READS_MAX_WORKERS", "3")),
         openai_api_key=openai_api_key or None,

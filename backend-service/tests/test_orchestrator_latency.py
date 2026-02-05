@@ -150,7 +150,6 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         codex = _FakeCodex()
         runtime_store = _FakeRuntimeConfigStore(
             RuntimeConfig(
-                execution_mode="planner",
                 planner_mode="fast",
                 planner_timeout_seconds=60,
                 execution_parallel_reads_enabled=True,
@@ -203,7 +202,6 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime_store = _FakeRuntimeConfigStore(
             RuntimeConfig(
-                execution_mode="planner",
                 planner_mode="fast",
                 planner_timeout_seconds=60,
                 execution_parallel_reads_enabled=True,
@@ -238,38 +236,6 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(modes_by_step.get(2), "parallel_read")
         self.assertEqual(modes_by_step.get(3), "parallel_read")
         self.assertEqual(modes_by_step.get(4), "sequential")
-
-    async def test_execute_mode_skips_planner_and_runs_direct_mapping(self) -> None:
-        (self.context.root_path / "notes.txt").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-
-        planner = _FakePlanner([])
-        codex = _FakeCodex()
-        runtime_store = _FakeRuntimeConfigStore(
-            RuntimeConfig(
-                execution_mode="execute",
-                direct_run_timeout_seconds=30,
-                execution_parallel_reads_enabled=True,
-                execution_parallel_reads_max_workers=3,
-            )
-        )
-        orchestrator = RunOrchestrator(
-            project_store=self.project_store,
-            indexer=_FakeIndexer(),
-            planner=planner,  # type: ignore[arg-type]
-            codex=codex,  # type: ignore[arg-type]
-            runtime_config_store=runtime_store,  # type: ignore[arg-type]
-        )
-
-        run_id = await self._run_orchestrator(orchestrator)
-        run = self.repo.get_run(run_id)
-        self.assertIsNotNone(run)
-        self.assertEqual(run["status"], "done")
-        self.assertEqual(len(planner.plan_calls), 0)
-
-        events = self.repo.list_events(after_id=0, conversation_id=self.conversation["id"], limit=400)
-        started = [event for event in events if event["type"] == "run_started"]
-        self.assertTrue(started)
-        self.assertEqual(started[-1]["payload"].get("execution_mode"), "execute")
 
 
 if __name__ == "__main__":

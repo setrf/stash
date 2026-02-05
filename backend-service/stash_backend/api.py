@@ -90,8 +90,6 @@ def create_app(services: Services) -> FastAPI:
             clear_planner_cmd=request.clear_planner_cmd,
             planner_timeout_seconds=request.planner_timeout_seconds,
             planner_mode=request.planner_mode,
-            execution_mode=request.execution_mode,
-            direct_run_timeout_seconds=request.direct_run_timeout_seconds,
             execution_parallel_reads_enabled=request.execution_parallel_reads_enabled,
             execution_parallel_reads_max_workers=request.execution_parallel_reads_max_workers,
             openai_api_key=request.openai_api_key,

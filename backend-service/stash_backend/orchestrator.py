@@ -10,13 +10,11 @@ from typing import Any
 
 from .codex import CodexCommandError, CodexExecutor
 from .db import ProjectRepository
-from .direct_intent import build_direct_commands
 from .indexer import IndexingService
 from .planner import Planner
 from .project_store import ProjectStore
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .skills import load_skill_bundle
-from .types import PlanResult
 from .utils import ensure_inside
 
 logger = logging.getLogger(__name__)
@@ -331,23 +329,11 @@ class RunOrchestrator:
         planning_ms = 0
         command_exec_ms = 0
         synthesis_ms = 0
-        execution_mode = runtime.execution_mode if runtime.execution_mode in {"planner", "execute"} else "execute"
-        run_deadline = run_started + max(10, int(runtime.direct_run_timeout_seconds))
-        timeout_reason: str | None = None
-        timed_out = False
 
         try:
             with context.lock:
                 repo.update_run(run_id, status="running")
-                repo.add_event(
-                    "run_started",
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    payload={
-                        "trigger_message_id": trigger_message_id,
-                        "execution_mode": execution_mode,
-                    },
-                )
+                repo.add_event("run_started", conversation_id=conversation_id, run_id=run_id, payload={"trigger_message_id": trigger_message_id})
 
             trigger_msg = repo.get_message(conversation_id, trigger_message_id)
             if not trigger_msg:
@@ -373,37 +359,16 @@ class RunOrchestrator:
 
             planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=rag_hits)
             planning_started = time.perf_counter()
-            if execution_mode == "execute":
-                direct_commands = build_direct_commands(
-                    user_message=planner_user_message,
-                    parts=trigger_msg.get("parts") if isinstance(trigger_msg.get("parts"), list) else [],
-                    project_root=context.root_path.resolve(),
-                )
-                if not direct_commands:
-                    plan = PlanResult(
-                        planner_text="Could not map prompt safely in execute mode.",
-                        commands=[],
-                        used_backend="direct_intent",
-                        used_fallback="direct_intent_unmapped",
-                    )
-                else:
-                    plan = PlanResult(
-                        planner_text="Execute mode: running deterministic command mapping.",
-                        commands=direct_commands,
-                        used_backend="direct_intent",
-                        used_fallback=None,
-                    )
-            else:
-                plan = await asyncio.to_thread(
-                    self.planner.plan,
-                    user_message=planner_user_message,
-                    conversation_history=history,
-                    skill_bundle=skills,
-                    project_summary=repo.project_view(),
-                )
+            plan = await asyncio.to_thread(
+                self.planner.plan,
+                user_message=planner_user_message,
+                conversation_history=history,
+                skill_bundle=skills,
+                project_summary=repo.project_view(),
+            )
             planning_ms = int((time.perf_counter() - planning_started) * 1000)
 
-            if execution_mode == "planner" and plan.timed_out_primary and not plan.commands and plan.used_fallback != "heuristic_read":
+            if plan.timed_out_primary and not plan.commands and plan.used_fallback != "heuristic_read":
                 logger.warning(
                     "Planner delayed run_id=%s mode=%s elapsed_ms=%s backend=%s fallback=%s",
                     run_id,
@@ -451,7 +416,7 @@ class RunOrchestrator:
                     plan = delayed_plan
 
             logger.info(
-                "Run planning produced run_id=%s commands=%s planning_ms=%s rag_scan_ms=%s rag_search_ms=%s rag_hits=%s mode=%s execution_mode=%s backend=%s fallback=%s timed_out_primary=%s",
+                "Planner produced run_id=%s commands=%s planning_ms=%s rag_scan_ms=%s rag_search_ms=%s rag_hits=%s mode=%s backend=%s fallback=%s timed_out_primary=%s",
                 run_id,
                 len(plan.commands),
                 planning_ms,
@@ -459,7 +424,6 @@ class RunOrchestrator:
                 search_ms,
                 len(rag_hits),
                 runtime.planner_mode,
-                execution_mode,
                 plan.used_backend,
                 plan.used_fallback,
                 plan.timed_out_primary,
@@ -478,7 +442,6 @@ class RunOrchestrator:
                         "used_backend": plan.used_backend,
                         "used_fallback": plan.used_fallback,
                         "timed_out_primary": plan.timed_out_primary,
-                        "execution_mode": execution_mode,
                     },
                 )
 
@@ -487,7 +450,6 @@ class RunOrchestrator:
             output_files_for_response: list[str] = []
             output_file_seen: set[str] = set()
             failures = 0
-            unmapped_execute_request = execution_mode == "execute" and not plan.commands
 
             async def execute_one_step(
                 *,
@@ -650,11 +612,6 @@ class RunOrchestrator:
                 indexed_commands = list(enumerate(plan.commands, start=1))
                 pointer = 0
                 while pointer < len(indexed_commands):
-                    if execution_mode == "execute" and time.perf_counter() >= run_deadline:
-                        timed_out = True
-                        timeout_reason = "direct_total_cap_exceeded"
-                        logger.warning("Run exceeded direct timeout cap run_id=%s cap_seconds=%s", run_id, runtime.direct_run_timeout_seconds)
-                        break
                     step_index, command = indexed_commands[pointer]
                     if parallel_enabled and self._is_parallel_read_command(command.cmd):
                         batch: list[tuple[int, Any]] = []
@@ -709,11 +666,6 @@ class RunOrchestrator:
                                     continue
                                 output_file_seen.add(artifact_lower)
                                 output_files_for_response.append(artifact)
-                        if execution_mode == "execute" and time.perf_counter() >= run_deadline:
-                            timed_out = True
-                            timeout_reason = "direct_total_cap_exceeded"
-                            logger.warning("Run exceeded direct timeout cap after parallel batch run_id=%s", run_id)
-                            break
                         continue
 
                     pointer += 1
@@ -745,38 +697,25 @@ class RunOrchestrator:
                             continue
                         output_file_seen.add(artifact_lower)
                         output_files_for_response.append(artifact)
-                if timed_out:
-                    tool_summaries.append("Run timeout: total execute cap exceeded before finishing all steps.")
 
-            if execution_mode == "execute":
-                assistant_content = ""
-            else:
-                assistant_content = self.planner.sanitize_assistant_text(plan.planner_text) or plan.planner_text
-            if not timed_out:
-                synthesis_started = time.perf_counter()
-                synthesized = self.planner.synthesize_response(
-                    user_message=str(trigger_msg.get("content", "")),
-                    planner_text=plan.planner_text if execution_mode == "planner" else "",
-                    project_summary=repo.project_view(),
-                    tool_results=tool_results_for_response,
-                    output_files=output_files_for_response,
-                )
-                synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
-                if synthesized:
-                    assistant_content = synthesized
-            elif not assistant_content.strip():
-                assistant_content = (
-                    "Run timed out before completion (30s direct cap reached). "
-                    "Some steps may have completed."
-                )
+            assistant_content = self.planner.sanitize_assistant_text(plan.planner_text) or plan.planner_text
+            synthesis_started = time.perf_counter()
+            synthesized = self.planner.synthesize_response(
+                user_message=str(trigger_msg.get("content", "")),
+                planner_text=plan.planner_text,
+                project_summary=repo.project_view(),
+                tool_results=tool_results_for_response,
+                output_files=output_files_for_response,
+            )
+            synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
+            if synthesized:
+                assistant_content = synthesized
 
             assistant_content = self._append_output_file_tags(assistant_content, output_files_for_response)
             if failures and tool_summaries:
                 assistant_content += "\n\nExecution summary:\n- " + "\n- ".join(tool_summaries)
             elif not assistant_content.strip() and tool_summaries:
                 assistant_content = "Execution summary:\n- " + "\n- ".join(tool_summaries)
-            elif execution_mode == "execute" and not assistant_content.strip() and not plan.commands:
-                assistant_content = "Could not map prompt safely in execute mode."
 
             total_ms = int((time.perf_counter() - run_started) * 1000)
             latency_summary_payload = {
@@ -808,58 +747,7 @@ class RunOrchestrator:
                     payload={"message_id": final_message["id"]},
                 )
 
-                if timed_out:
-                    repo.update_run(
-                        run_id,
-                        status="failed",
-                        output_summary=f"{len(plan.commands)} step(s), timeout",
-                        error="Run timed out before completion",
-                        finished=True,
-                    )
-                    repo.add_event(
-                        "run_failed",
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        payload={
-                            "failures": failures,
-                            "run_timeout_reason": timeout_reason or "direct_total_cap_exceeded",
-                            "latency_ms": {
-                                "rag_scan": scan_ms,
-                                "rag_search": search_ms,
-                                "planning": planning_ms,
-                                "execution": command_exec_ms,
-                                "synthesis": synthesis_ms,
-                                "total": total_ms,
-                            },
-                        },
-                    )
-                elif unmapped_execute_request:
-                    repo.update_run(
-                        run_id,
-                        status="failed",
-                        output_summary="0 step(s), unmapped execute intent",
-                        error="Could not map prompt safely in execute mode",
-                        finished=True,
-                    )
-                    repo.add_event(
-                        "run_failed",
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        payload={
-                            "failures": 1,
-                            "run_timeout_reason": None,
-                            "error": "Could not map prompt safely in execute mode",
-                            "latency_ms": {
-                                "rag_scan": scan_ms,
-                                "rag_search": search_ms,
-                                "planning": planning_ms,
-                                "execution": command_exec_ms,
-                                "synthesis": synthesis_ms,
-                                "total": total_ms,
-                            },
-                        },
-                    )
-                elif failures:
+                if failures:
                     repo.update_run(
                         run_id,
                         status="failed",
@@ -873,7 +761,6 @@ class RunOrchestrator:
                         run_id=run_id,
                         payload={
                             "failures": failures,
-                            "run_timeout_reason": timeout_reason,
                             "latency_ms": {
                                 "rag_scan": scan_ms,
                                 "rag_search": search_ms,
@@ -897,7 +784,6 @@ class RunOrchestrator:
                         run_id=run_id,
                         payload={
                             "steps": len(plan.commands),
-                            "run_timeout_reason": timeout_reason,
                             "latency_ms": {
                                 "rag_scan": scan_ms,
                                 "rag_search": search_ms,
