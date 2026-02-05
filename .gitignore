@@ -1,13 +1,21 @@
-# Python caches
-__pycache__/
-*.py[cod]
+# macOS
+.DS_Store
 
-# Local virtual environments
-.venv/
-backend-service/.venv/
+# Xcode / Swift
+DerivedData/
+*.xcworkspace
+*.xcuserstate
+*.xcuserdatad/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
 
-# Local project runtime state
-.stash/
+# SwiftPM
+.build/
+Packages/
+Package.resolved
 
 # Local env/config
 .env.local
@@ -22,3 +30,6 @@ frontend-macos/.swiftpm/
 # Generated build artifacts
 backend-service/build/
 frontend-macos/Resources/AppIcon.iconset/
+
+# App logs
+*.log
