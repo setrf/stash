@@ -84,6 +84,26 @@ enum JSONValue: Decodable, Hashable {
         }
     }
 
+    var boolValue: Bool? {
+        switch self {
+        case let .bool(value):
+            return value
+        case let .string(value):
+            let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if lowered == "true" {
+                return true
+            }
+            if lowered == "false" {
+                return false
+            }
+            return nil
+        case let .number(value):
+            return value != 0
+        default:
+            return nil
+        }
+    }
+
     var arrayValue: [JSONValue]? {
         if case let .array(value) = self {
             return value

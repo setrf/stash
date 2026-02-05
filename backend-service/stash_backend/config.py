@@ -20,6 +20,9 @@ class Settings:
     codex_planner_model: str = DEFAULT_CODEX_PLANNER_MODEL
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 60
+    planner_mode: str = "fast"
+    execution_parallel_reads_enabled: bool = True
+    execution_parallel_reads_max_workers: int = 3
     openai_api_key: str | None = None
     openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -44,6 +47,9 @@ def load_settings() -> Settings:
         codex_planner_model=os.getenv("STASH_CODEX_PLANNER_MODEL", DEFAULT_CODEX_PLANNER_MODEL).strip(),
         planner_cmd=os.getenv("STASH_PLANNER_CMD"),
         planner_timeout_seconds=int(os.getenv("STASH_PLANNER_TIMEOUT_SECONDS", "60")),
+        planner_mode=os.getenv("STASH_PLANNER_MODE", "fast").strip().lower(),
+        execution_parallel_reads_enabled=os.getenv("STASH_EXECUTION_PARALLEL_READS_ENABLED", "true").strip().lower() != "false",
+        execution_parallel_reads_max_workers=int(os.getenv("STASH_EXECUTION_PARALLEL_READS_MAX_WORKERS", "3")),
         openai_api_key=openai_api_key or None,
         openai_model=os.getenv("STASH_OPENAI_MODEL", "gpt-5").strip(),
         openai_base_url=os.getenv("STASH_OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),

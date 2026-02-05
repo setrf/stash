@@ -63,6 +63,7 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(result.commands, [])
         self.assertIn("Planner fallback: could not generate an execution plan.", result.planner_text)
+        self.assertEqual(result.used_backend, "fallback")
 
     def test_non_actionable_message_keeps_original_fallback(self) -> None:
         planner = Planner(Settings(codex_bin="definitely-not-installed", planner_cmd=None))
@@ -75,6 +76,7 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(result.commands, [])
         self.assertIn("Planner fallback: could not generate an execution plan.", result.planner_text)
+        self.assertEqual(result.used_backend, "fallback")
 
     def test_openai_planner_is_used_when_configured_as_primary_backend(self) -> None:
         planner = Planner(
@@ -127,7 +129,7 @@ class PlannerTests(unittest.TestCase):
         )
         with (
             mock.patch.object(planner, "_run_external_planner", return_value=None),
-            mock.patch.object(planner, "_run_codex_planner", return_value=codex_text) as mocked_codex,
+            mock.patch.object(planner, "_run_codex_planner", return_value=(codex_text, False)) as mocked_codex,
             mock.patch.object(planner, "_run_openai_planner", return_value=None) as mocked_openai,
         ):
             result = planner.plan(
@@ -141,6 +143,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(mocked_openai.call_count, 0)
         self.assertEqual(len(result.commands), 1)
         self.assertEqual(result.commands[0].cmd, "echo from-codex")
+        self.assertEqual(result.used_backend, "codex")
 
     def test_codex_retry_is_used_when_primary_attempt_has_no_commands(self) -> None:
         planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
@@ -157,7 +160,27 @@ class PlannerTests(unittest.TestCase):
         with (
             mock.patch.object(planner, "_run_external_planner", return_value=None),
             mock.patch.object(planner, "_run_openai_planner", return_value=None),
-            mock.patch.object(planner, "_run_codex_planner", side_effect=[primary_text, retry_text]) as mocked_run,
+            mock.patch.object(planner, "_run_codex_planner", side_effect=[(primary_text, False), (retry_text, False)]) as mocked_run,
+        ):
+            result = planner.plan(
+                user_message="create notes.txt",
+                conversation_history=[],
+                skill_bundle="",
+                project_summary=_project_summary(),
+                allow_retry=True,
+            )
+
+        self.assertEqual(mocked_run.call_count, 2)
+        self.assertEqual(len(result.commands), 1)
+        self.assertEqual(result.commands[0].cmd, "echo ok")
+        self.assertEqual(result.used_fallback, "codex_retry")
+
+    def test_fast_mode_does_not_retry_when_primary_attempt_has_no_commands(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        with (
+            mock.patch.object(planner, "_run_external_planner", return_value=None),
+            mock.patch.object(planner, "_run_openai_planner", return_value=None),
+            mock.patch.object(planner, "_run_codex_planner", return_value=("No commands", False)) as mocked_run,
         ):
             result = planner.plan(
                 user_message="create notes.txt",
@@ -166,9 +189,20 @@ class PlannerTests(unittest.TestCase):
                 project_summary=_project_summary(),
             )
 
-        self.assertEqual(mocked_run.call_count, 2)
+        self.assertEqual(mocked_run.call_count, 1)
+        self.assertEqual(result.used_backend, "fallback")
+
+    def test_heuristic_read_plan_keeps_absolute_path(self) -> None:
+        planner = Planner(Settings(codex_bin="definitely-not-installed", planner_cmd=None))
+        result = planner._heuristic_read_plan(
+            user_message="read /Users/demo/Documents/resume.md and summarize it",
+            project_summary=_project_summary(),
+        )
+
+        self.assertIsNotNone(result)
         self.assertEqual(len(result.commands), 1)
-        self.assertEqual(result.commands[0].cmd, "echo ok")
+        self.assertIn("cat /Users/demo/Documents/resume.md", result.commands[0].cmd)
+        self.assertEqual(result.used_fallback, "heuristic_read")
 
     def test_codex_planner_sets_medium_reasoning_effort(self) -> None:
         planner = Planner(Settings(codex_bin="codex", planner_cmd=None))

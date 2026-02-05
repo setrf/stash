@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 PLANNER_BACKENDS = {"auto", "codex_cli", "openai_api"}
 CODEX_MODES = {"cli", "shell"}
+PLANNER_MODES = {"fast", "balanced", "quality"}
 
 
 @dataclass(slots=True)
@@ -24,6 +25,9 @@ class RuntimeConfig:
     codex_planner_model: str | None = None
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 60
+    planner_mode: str = "fast"
+    execution_parallel_reads_enabled: bool = True
+    execution_parallel_reads_max_workers: int = 3
     openai_api_key: str | None = None
     openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -38,6 +42,9 @@ class RuntimeConfig:
             codex_planner_model=settings.codex_planner_model or None,
             planner_cmd=settings.planner_cmd,
             planner_timeout_seconds=settings.planner_timeout_seconds,
+            planner_mode=settings.planner_mode if settings.planner_mode in PLANNER_MODES else "fast",
+            execution_parallel_reads_enabled=bool(settings.execution_parallel_reads_enabled),
+            execution_parallel_reads_max_workers=max(1, min(settings.execution_parallel_reads_max_workers, 8)),
             openai_api_key=settings.openai_api_key,
             openai_model=settings.openai_model or "gpt-5",
             openai_base_url=settings.openai_base_url or "https://api.openai.com/v1",
@@ -73,6 +80,9 @@ class RuntimeConfigStore:
             "codex_planner_model": cfg.codex_planner_model or "",
             "planner_cmd": cfg.planner_cmd,
             "planner_timeout_seconds": cfg.planner_timeout_seconds,
+            "planner_mode": cfg.planner_mode,
+            "execution_parallel_reads_enabled": cfg.execution_parallel_reads_enabled,
+            "execution_parallel_reads_max_workers": cfg.execution_parallel_reads_max_workers,
             "openai_api_key_set": bool(cfg.openai_api_key),
             "openai_model": cfg.openai_model,
             "openai_base_url": cfg.openai_base_url,
@@ -90,6 +100,9 @@ class RuntimeConfigStore:
         planner_cmd: str | None = None,
         clear_planner_cmd: bool = False,
         planner_timeout_seconds: int | None = None,
+        planner_mode: str | None = None,
+        execution_parallel_reads_enabled: bool | None = None,
+        execution_parallel_reads_max_workers: int | None = None,
         openai_api_key: str | None = None,
         clear_openai_api_key: bool = False,
         openai_model: str | None = None,
@@ -131,6 +144,20 @@ class RuntimeConfigStore:
                 if planner_timeout_seconds < 20 or planner_timeout_seconds > 600:
                     raise ValueError("planner_timeout_seconds must be between 20 and 600")
                 next_cfg.planner_timeout_seconds = planner_timeout_seconds
+
+            if planner_mode is not None:
+                cleaned_mode = planner_mode.strip().lower()
+                if cleaned_mode not in PLANNER_MODES:
+                    raise ValueError("planner_mode must be one of: fast, balanced, quality")
+                next_cfg.planner_mode = cleaned_mode
+
+            if execution_parallel_reads_enabled is not None:
+                next_cfg.execution_parallel_reads_enabled = bool(execution_parallel_reads_enabled)
+
+            if execution_parallel_reads_max_workers is not None:
+                if execution_parallel_reads_max_workers < 1 or execution_parallel_reads_max_workers > 8:
+                    raise ValueError("execution_parallel_reads_max_workers must be between 1 and 8")
+                next_cfg.execution_parallel_reads_max_workers = execution_parallel_reads_max_workers
 
             if clear_openai_api_key:
                 next_cfg.openai_api_key = None
@@ -179,6 +206,9 @@ class RuntimeConfigStore:
                 codex_planner_model=parsed.get("codex_planner_model"),
                 planner_cmd=parsed.get("planner_cmd"),
                 planner_timeout_seconds=parsed.get("planner_timeout_seconds"),
+                planner_mode=parsed.get("planner_mode"),
+                execution_parallel_reads_enabled=parsed.get("execution_parallel_reads_enabled"),
+                execution_parallel_reads_max_workers=parsed.get("execution_parallel_reads_max_workers"),
                 openai_api_key=parsed.get("openai_api_key"),
                 openai_model=parsed.get("openai_model"),
                 openai_base_url=parsed.get("openai_base_url"),

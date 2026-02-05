@@ -180,6 +180,9 @@ class RuntimeConfigResponse(BaseModel):
     codex_planner_model: str
     planner_cmd: str | None = None
     planner_timeout_seconds: int
+    planner_mode: Literal["fast", "balanced", "quality"]
+    execution_parallel_reads_enabled: bool
+    execution_parallel_reads_max_workers: int
     openai_api_key_set: bool
     openai_model: str
     openai_base_url: str
@@ -195,6 +198,9 @@ class RuntimeConfigUpdateRequest(BaseModel):
     planner_cmd: str | None = None
     clear_planner_cmd: bool = False
     planner_timeout_seconds: int | None = Field(default=None, ge=20, le=600)
+    planner_mode: Literal["fast", "balanced", "quality"] | None = None
+    execution_parallel_reads_enabled: bool | None = None
+    execution_parallel_reads_max_workers: int | None = Field(default=None, ge=1, le=8)
     openai_api_key: str | None = None
     clear_openai_api_key: bool = False
     openai_model: str | None = None

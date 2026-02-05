@@ -1138,6 +1138,9 @@ final class AppViewModel: ObservableObject {
             let commandCount = event.payload["command_count"]?.intValue ?? 0
             let ragHitCount = event.payload["rag_hit_count"]?.intValue ?? 0
             let plannerPreview = sanitizePlannerPreview(event.payload["planner_preview"]?.stringValue ?? "")
+            let backend = event.payload["used_backend"]?.stringValue ?? "unknown"
+            let fallback = event.payload["used_fallback"]?.stringValue
+            let timedOutPrimary = event.payload["timed_out_primary"]?.boolValue ?? false
             runPlannerPreview = plannerPreview.isEmpty ? nil : plannerPreview
             if let commands = event.payload["commands"]?.stringArrayValue, !commands.isEmpty {
                 runTodos = commands.enumerated().map { index, command in
@@ -1146,15 +1149,34 @@ final class AppViewModel: ObservableObject {
             }
             runThinkingText = "Plan generated"
             runPlanningText = commandCount > 0 ? "Executing \(commandCount) planned step(s)..." : "No runnable steps in plan."
+            var planDetail = "Commands: \(max(commandCount, runTodos.count)) • Indexed hits: \(ragHitCount) • Backend: \(backend)"
+            if let fallback, !fallback.isEmpty {
+                planDetail += " • Fallback: \(fallback)"
+            }
+            if timedOutPrimary {
+                planDetail += " • Primary timeout recovered"
+            }
             appendRunFeedbackEvent(
                 type: "planning",
                 title: "Plan ready",
-                detail: "Commands: \(max(commandCount, runTodos.count)) • Indexed hits: \(ragHitCount)",
+                detail: planDetail,
+                timestampISO: event.ts
+            )
+
+        case "run_planning_delayed":
+            let elapsed = event.payload["elapsed_ms"]?.intValue ?? 0
+            runThinkingText = "Planning is taking longer..."
+            runPlanningText = "Continuing in background while planner works."
+            appendRunFeedbackEvent(
+                type: "planning",
+                title: "Planning delayed",
+                detail: "Elapsed: \(elapsed) ms",
                 timestampISO: event.ts
             )
 
         case "run_step_started":
             let stepIndex = event.payload["step_index"]?.intValue ?? 0
+            let executionMode = event.payload["execution_mode"]?.stringValue
             if stepIndex > 0 {
                 updateTodoStatus(stepIndex: stepIndex, status: "running")
             }
@@ -1164,23 +1186,41 @@ final class AppViewModel: ObservableObject {
             } else {
                 stepTitle = nil
             }
+            var detail = stepTitle
+            if let executionMode, !executionMode.isEmpty {
+                detail = [detail, "mode=\(executionMode)"]
+                    .compactMap { $0 }
+                    .joined(separator: " • ")
+            }
             appendRunFeedbackEvent(
                 type: "execution",
                 title: stepIndex > 0 ? "Step \(stepIndex) started" : "Step started",
-                detail: stepTitle,
+                detail: detail,
                 timestampISO: event.ts
             )
 
         case "run_step_completed":
             let stepIndex = event.payload["step_index"]?.intValue ?? 0
             let status = (event.payload["status"]?.stringValue ?? "completed").lowercased()
+            let executionMode = event.payload["execution_mode"]?.stringValue
             if stepIndex > 0 {
                 updateTodoStatus(stepIndex: stepIndex, status: status)
             }
             let errorDetail = event.payload["error"]?.stringValue
             let runtimeDetail = event.payload["detail"]?.stringValue
             let exitCode = event.payload["exit_code"]?.intValue
-            let detail = errorDetail ?? runtimeDetail ?? (exitCode != nil ? "exit_code=\(exitCode ?? 0)" : nil)
+            let baseDetail = errorDetail ?? runtimeDetail ?? (exitCode != nil ? "exit_code=\(exitCode ?? 0)" : nil)
+            let detail: String?
+            if let executionMode, !executionMode.isEmpty {
+                let prefix = "mode=\(executionMode)"
+                if let baseDetail, !baseDetail.isEmpty {
+                    detail = "\(prefix) • \(baseDetail)"
+                } else {
+                    detail = prefix
+                }
+            } else {
+                detail = baseDetail
+            }
             appendRunFeedbackEvent(
                 type: status == "failed" ? "error" : "execution",
                 title: stepIndex > 0 ? "Step \(stepIndex) \(status)" : "Step \(status)",
@@ -1199,6 +1239,20 @@ final class AppViewModel: ObservableObject {
             let failures = event.payload["failures"]?.intValue
             let detail = failures != nil ? "\(failures ?? 0) step(s) failed" : nil
             appendRunFeedbackEvent(type: "error", title: "Run failed", detail: detail, timestampISO: event.ts)
+
+        case "run_latency_summary":
+            let planning = event.payload["planning_ms"]?.intValue ?? 0
+            let execution = event.payload["execution_ms"]?.intValue ?? 0
+            let synthesis = event.payload["synthesis_ms"]?.intValue ?? 0
+            let ragScan = event.payload["rag_scan_ms"]?.intValue ?? 0
+            let ragSearch = event.payload["rag_search_ms"]?.intValue ?? 0
+            let total = event.payload["total_ms"]?.intValue ?? 0
+            appendRunFeedbackEvent(
+                type: "status",
+                title: "Latency summary",
+                detail: "plan=\(planning)ms • exec=\(execution)ms • synth=\(synthesis)ms • rag=\(ragScan + ragSearch)ms • total=\(total)ms",
+                timestampISO: event.ts
+            )
 
         case "run_cancelled":
             runThinkingText = nil
@@ -1343,6 +1397,7 @@ final class AppViewModel: ObservableObject {
 
         runPollTask = Task {
             var transientPollErrors = 0
+            var timeoutPollStreak = 0
             defer {
                 Task { @MainActor in
                     self.runInProgress = false
@@ -1359,6 +1414,7 @@ final class AppViewModel: ObservableObject {
                 do {
                     let run = try await self.client.run(projectID: projectID, runID: runID)
                     transientPollErrors = 0
+                    timeoutPollStreak = 0
                     await MainActor.run {
                         self.runStatusText = "Run \(run.status)"
                         self.updateRunFeedback(run: run)
@@ -1374,25 +1430,42 @@ final class AppViewModel: ObservableObject {
                         return
                     }
                 } catch {
-                    transientPollErrors += 1
                     let isTimeout: Bool
                     if case BackendError.requestTimedOut = error {
                         isTimeout = true
                     } else {
                         isTimeout = false
                     }
-                    if isTimeout, transientPollErrors < 10 {
+                    if isTimeout {
+                        timeoutPollStreak += 1
+                        await MainActor.run {
+                            self.runStatusText = "Run still processing..."
+                            if timeoutPollStreak == 1 || timeoutPollStreak % 10 == 0 {
+                                self.appendRunFeedbackEvent(
+                                    type: "status",
+                                    title: "Waiting for backend...",
+                                    detail: "Poll timeout, retrying"
+                                )
+                            }
+                        }
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
+                    }
+
+                    transientPollErrors += 1
+                    if transientPollErrors < 8 {
                         await MainActor.run {
                             self.runStatusText = "Run still processing..."
                             self.appendRunFeedbackEvent(
                                 type: "status",
-                                title: "Waiting for backend...",
-                                detail: "Poll timeout, retrying"
+                                title: "Temporary run polling issue",
+                                detail: error.localizedDescription
                             )
                         }
                         try? await Task.sleep(for: .seconds(1))
                         continue
                     }
+
                     await MainActor.run {
                         self.runThinkingText = nil
                         self.runPlanningText = "Run polling failed."

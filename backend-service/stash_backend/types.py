@@ -46,6 +46,9 @@ class TaggedCommand:
 class PlanResult:
     planner_text: str
     commands: list[TaggedCommand]
+    timed_out_primary: bool = False
+    used_backend: str = "unknown"
+    used_fallback: str | None = None
 
 
 @dataclass(slots=True)
