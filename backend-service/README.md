@@ -19,6 +19,7 @@ Every project stores all backend state inside the project folder:
 
 ```text
 <project_root>/
+  STASH_HISTORY.md
   .stash/
     project.json
     stash.db

@@ -101,6 +101,8 @@ echo "[8/8] verify portable project state"
 [ -f "$PROJECT_ROOT/.stash/project.json" ]
 [ -f "$PROJECT_ROOT/.stash/stash.db" ]
 [ -d "$PROJECT_ROOT/.stash/worktrees" ]
+[ -f "$PROJECT_ROOT/STASH_HISTORY.md" ]
+grep -q "run_completed" "$PROJECT_ROOT/STASH_HISTORY.md"
 
 HITS=$(cat /tmp/stash-smoke-hit-count.txt)
 MSGS=$(cat /tmp/stash-smoke-msg-count.txt)
