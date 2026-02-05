@@ -71,6 +71,7 @@ This does a single local setup for the stack:
 
 - Creates `.venv/`
 - Installs backend dependencies
+- Installs required runtime tools (including `uv`) and document packages (including `pypdf`) into the backend environment
 - Uses app-managed runtime configuration (no `.env` setup required)
 - Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 

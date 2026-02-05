@@ -49,7 +49,7 @@ public struct RootView: View {
         }
         .sheet(isPresented: $viewModel.setupSheetPresented) {
             RuntimeSetupSheet(viewModel: viewModel)
-                .interactiveDismissDisabled(viewModel.onboardingActive && !viewModel.onboardingReadyToFinish)
+                .interactiveDismissDisabled(false)
         }
     }
 }
@@ -232,6 +232,9 @@ private struct FilesPanel: View {
                 ) { providers in
                     viewModel.handleFileDrop(providers: providers, toRelativeDirectory: targetDirectory)
                 }
+                .onTapGesture(count: 2) {
+                    viewModel.openFileItemInOS(item)
+                }
             }
             .listStyle(.inset)
             .onDrop(of: [UTType.fileURL], isTargeted: $rootDropIsTargeted) { providers in
@@ -319,7 +322,7 @@ private struct ChatPanel: View {
 
             Divider()
 
-            if viewModel.messages.isEmpty {
+            if viewModel.visibleMessages.isEmpty {
                 VStack(spacing: 10) {
                     Text("Ask Stash to work on your files")
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
@@ -330,11 +333,22 @@ private struct ChatPanel: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                MessageTimeline(messages: viewModel.messages)
+                MessageTimeline(
+                    messages: viewModel.visibleMessages,
+                    onOpenTaggedFile: { path in
+                        viewModel.openTaggedOutputPathInOS(path)
+                    }
+                )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            if viewModel.runInProgress || viewModel.runThinkingText != nil || !viewModel.runTodos.isEmpty {
+            if viewModel.runInProgress ||
+                viewModel.runThinkingText != nil ||
+                viewModel.runPlanningText != nil ||
+                viewModel.runPlannerPreview != nil ||
+                !viewModel.runTodos.isEmpty ||
+                !viewModel.runFeedbackEvents.isEmpty
+            {
                 RunFeedbackCard(viewModel: viewModel)
                     .padding(.horizontal, 18)
                     .padding(.bottom, 8)
@@ -401,40 +415,129 @@ private struct ChatPanel: View {
 
 private struct RunFeedbackCard: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var reasoningExpanded = true
+    @State private var todosExpanded = true
+    @State private var feedExpanded = true
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Agent Feedback")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundStyle(CodexTheme.textSecondary)
-
-            if let runThinkingText = viewModel.runThinkingText {
-                Text("Thinking: \(runThinkingText)")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(CodexTheme.textPrimary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Agent Run")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(CodexTheme.textSecondary)
+                Spacer()
+                if let runStatusText = viewModel.runStatusText {
+                    Text(runStatusText)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                }
             }
 
-            if let runPlanningText = viewModel.runPlanningText {
-                Text("Planning: \(runPlanningText)")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(CodexTheme.textPrimary)
+            if viewModel.runThinkingText != nil || viewModel.runPlanningText != nil || viewModel.runPlannerPreview != nil {
+                DisclosureGroup(isExpanded: $reasoningExpanded) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let runThinkingText = viewModel.runThinkingText {
+                            HStack(spacing: 8) {
+                                if viewModel.runInProgress {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .tint(CodexTheme.accent)
+                                }
+                                Text(runThinkingText)
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    .foregroundStyle(CodexTheme.textPrimary)
+                            }
+                        }
+
+                        if let runPlanningText = viewModel.runPlanningText {
+                            Text(runPlanningText)
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(CodexTheme.textSecondary)
+                        }
+
+                        if let preview = viewModel.runPlannerPreview, !preview.isEmpty {
+                            ScrollView {
+                                Text(preview)
+                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(CodexTheme.textPrimary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                            }
+                            .frame(maxHeight: 160)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(CodexTheme.canvas.opacity(0.8))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(CodexTheme.border.opacity(0.8), lineWidth: 1)
+                            )
+                        }
+                    }
+                    .padding(.top, 6)
+                } label: {
+                    sectionHeader(title: "Thinking & Planning", count: nil)
+                }
             }
 
             if !viewModel.runTodos.isEmpty {
-                Text("Todos")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
-
-                ForEach(viewModel.runTodos) { todo in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(todoMarker(for: todo.status))
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(CodexTheme.textSecondary)
-                        Text(todo.title)
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(CodexTheme.textPrimary)
-                            .lineLimit(2)
+                DisclosureGroup(isExpanded: $todosExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(viewModel.runTodos) { todo in
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: todoIcon(for: todo.status))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(todoColor(for: todo.status))
+                                Text(todo.title)
+                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                    .foregroundStyle(CodexTheme.textPrimary)
+                                    .lineLimit(2)
+                                    .strikethrough(todo.status.lowercased() == "completed", color: CodexTheme.textSecondary)
+                            }
+                        }
                     }
+                    .padding(.top, 6)
+                } label: {
+                    sectionHeader(title: "Todos", count: viewModel.runTodos.count)
+                }
+            }
+
+            if !viewModel.runFeedbackEvents.isEmpty {
+                DisclosureGroup(isExpanded: $feedExpanded) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 6) {
+                            ForEach(viewModel.runFeedbackEvents) { event in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: eventIcon(for: event.type))
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(eventColor(for: event.type))
+                                        .padding(.top, 1)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text(event.timestamp)
+                                                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                                .foregroundStyle(CodexTheme.textSecondary)
+                                            Text(event.title)
+                                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                                .foregroundStyle(CodexTheme.textPrimary)
+                                        }
+                                        if let detail = event.detail, !detail.isEmpty {
+                                            Text(detail)
+                                                .font(.system(size: 11, weight: .regular, design: .rounded))
+                                                .foregroundStyle(CodexTheme.textSecondary)
+                                                .textSelection(.enabled)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 170)
+                    .padding(.top, 6)
+                } label: {
+                    sectionHeader(title: "Live Feed", count: viewModel.runFeedbackEvents.count)
                 }
             }
         }
@@ -450,16 +553,74 @@ private struct RunFeedbackCard: View {
         )
     }
 
-    private func todoMarker(for status: String) -> String {
+    private func sectionHeader(title: String, count: Int?) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+            if let count {
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(CodexTheme.textSecondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule()
+                            .fill(CodexTheme.canvas)
+                    )
+            }
+        }
+    }
+
+    private func todoIcon(for status: String) -> String {
         switch status.lowercased() {
         case "completed":
-            return "✓"
+            return "checkmark.circle.fill"
         case "running":
-            return "…"
+            return "clock.fill"
         case "failed":
-            return "!"
+            return "xmark.circle.fill"
         default:
-            return "•"
+            return "circle"
+        }
+    }
+
+    private func todoColor(for status: String) -> Color {
+        switch status.lowercased() {
+        case "completed":
+            return CodexTheme.success
+        case "running":
+            return CodexTheme.accent
+        case "failed":
+            return CodexTheme.danger
+        default:
+            return CodexTheme.textSecondary
+        }
+    }
+
+    private func eventIcon(for type: String) -> String {
+        switch type.lowercased() {
+        case "planning":
+            return "brain.head.profile"
+        case "execution":
+            return "terminal"
+        case "error":
+            return "xmark.octagon.fill"
+        default:
+            return "waveform.path.ecg"
+        }
+    }
+
+    private func eventColor(for type: String) -> Color {
+        switch type.lowercased() {
+        case "planning":
+            return CodexTheme.accent
+        case "execution":
+            return CodexTheme.textPrimary
+        case "error":
+            return CodexTheme.danger
+        default:
+            return CodexTheme.textSecondary
         }
     }
 }
@@ -540,9 +701,21 @@ private struct RuntimeSetupSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Planner: Codex CLI (latest model)")
+                Text("Planner: Codex CLI (GPT-5.3 Codex medium default)")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(CodexTheme.textPrimary)
+
+                Picker("Model", selection: $viewModel.setupCodexPlannerModel) {
+                    ForEach(viewModel.codexModelPresets) { preset in
+                        Text("\(preset.label) • \(preset.hint)")
+                            .tag(preset.value)
+                    }
+                }
+                .pickerStyle(.menu)
+
+                Text("Choose a faster model for lower latency, or keep Default for best compatibility.")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(CodexTheme.textSecondary)
 
                 if let resolved = viewModel.setupStatus?.codexBinResolved, !resolved.isEmpty {
                     Text("Codex binary: \(resolved)")
@@ -597,6 +770,11 @@ private struct RuntimeSetupSheet: View {
             }
 
             HStack {
+                Button("Close") {
+                    dismiss()
+                }
+                .buttonStyle(.bordered)
+
                 if viewModel.onboardingActive {
                     Button("Choose Project Folder") {
                         viewModel.presentProjectPicker()
@@ -727,13 +905,14 @@ private struct MentionSuggestionsList: View {
 
 private struct MessageTimeline: View {
     let messages: [Message]
+    let onOpenTaggedFile: (String) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(messages) { message in
-                        MessageRow(message: message)
+                        MessageRow(message: message, onOpenTaggedFile: onOpenTaggedFile)
                             .id(message.id)
                     }
                 }
@@ -752,9 +931,42 @@ private struct MessageTimeline: View {
 
 private struct MessageRow: View {
     let message: Message
+    let onOpenTaggedFile: (String) -> Void
 
     private var isUser: Bool {
         message.role.lowercased() == "user"
+    }
+
+    private var roleLabel: String {
+        isUser ? "YOU" : "STASH"
+    }
+
+    private var renderedContent: String {
+        let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isUser else { return content }
+
+        let noFileTags = stripStashFileTags(from: content)
+        let sanitized = stripCodexCommandBlocks(from: noFileTags)
+        if !sanitized.isEmpty {
+            if let summaryRange = sanitized.range(of: "Execution summary:") {
+                let beforeSummary = String(sanitized[..<summaryRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !beforeSummary.isEmpty {
+                    return sanitized
+                }
+                let summary = String(sanitized[summaryRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !summary.isEmpty {
+                    return summary
+                }
+            }
+            return sanitized
+        }
+        return content
+    }
+
+    private var taggedOutputFiles: [String] {
+        guard !isUser else { return [] }
+        return extractStashFileTags(from: message.content)
     }
 
     var body: some View {
@@ -763,7 +975,7 @@ private struct MessageRow: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text(message.role.uppercased())
+                    Text(roleLabel)
                         .font(.system(size: 10, weight: .bold, design: .rounded))
                         .foregroundStyle(CodexTheme.textSecondary)
                     Text(message.createdAt)
@@ -771,11 +983,50 @@ private struct MessageRow: View {
                         .foregroundStyle(CodexTheme.textSecondary)
                 }
 
-                Text(message.content)
+                Text(renderedContent)
                     .font(.system(size: 13, weight: .regular, design: .rounded))
                     .foregroundStyle(CodexTheme.textPrimary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                if !taggedOutputFiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Output Files")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                        ForEach(taggedOutputFiles, id: \.self) { path in
+                            Button {
+                                onOpenTaggedFile(path)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "doc.text")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(CodexTheme.accent)
+                                    Text(path)
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(CodexTheme.textPrimary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text("Open")
+                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(CodexTheme.accent)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .fill(CodexTheme.canvas.opacity(0.95))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.top, 2)
+                }
             }
             .padding(12)
             .background(
@@ -790,5 +1041,55 @@ private struct MessageRow: View {
 
             if !isUser { Spacer(minLength: 60) }
         }
+    }
+
+    private func stripCodexCommandBlocks(from text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<codex_cmd(?:\\s+[^>]*)?>[\\s\\S]*?<\\/codex_cmd>",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func extractStashFileTags(from text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<stash_file>\\s*([^<]+?)\\s*<\\/stash_file>",
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let matches = regex.matches(in: text, options: [], range: nsRange)
+        var paths: [String] = []
+        var seen = Set<String>()
+        for match in matches where match.numberOfRanges > 1 {
+            guard let range = Range(match.range(at: 1), in: text) else { continue }
+            let value = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowered = value.lowercased()
+            if value.isEmpty || seen.contains(lowered) { continue }
+            seen.insert(lowered)
+            paths.append(value)
+        }
+        return paths
+    }
+
+    private func stripStashFileTags(from text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?im)^\\s*[-*]?\\s*<stash_file>\\s*[^<]+?\\s*<\\/stash_file>\\s*$",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

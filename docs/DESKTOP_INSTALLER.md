@@ -61,6 +61,8 @@ What it does on launch:
 3. Launches frontend app binary
 4. Stops backend on app exit only if this launcher started it
 
+Installer also provisions backend runtime CLI/tools and document packages (including `uv` and `pypdf`) inside:
+
 The installed app does not execute from your repo path at runtime.
 It uses a backend runtime in:
 

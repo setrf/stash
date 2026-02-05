@@ -83,6 +83,23 @@ source "$BACKEND_VENV/bin/activate"
 python -m pip install --upgrade pip
 python -m pip install "$ROOT_DIR/backend-service"
 
+if ! command -v uv >/dev/null 2>&1; then
+  python -m pip install "uv>=0.4.30"
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "Failed to provision required CLI tool: uv" >&2
+  exit 1
+fi
+
+PYPDF_VERSION="$(python - <<'PY'
+import pypdf
+print(pypdf.__version__)
+PY
+)"
+
+log "Backend toolchain ready (uv: $(command -v uv), pypdf: $PYPDF_VERSION)"
+
 deactivate >/dev/null 2>&1 || true
 
 log "Building frontend release binary"
@@ -181,7 +198,7 @@ LOG_DIR="$HOME/Library/Logs/StashLocal"
 STATE_DIR="$HOME/Library/Application Support/StashLocal"
 BACKEND_PID_FILE="$STATE_DIR/backend.pid"
 mkdir -p "$LOG_DIR" "$STATE_DIR"
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"
+export PATH="$STASH_BACKEND_VENV/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"
 if [ -n "${STASH_CODEX_BIN:-}" ]; then
   CODEX_DIR="$(dirname "$STASH_CODEX_BIN")"
   if [ -d "$CODEX_DIR" ]; then

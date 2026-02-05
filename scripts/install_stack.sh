@@ -18,6 +18,21 @@ source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip
 python -m pip install -e "$BACKEND_DIR"
 
+if ! command -v uv >/dev/null 2>&1; then
+  python -m pip install "uv>=0.4.30"
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "Failed to provision required CLI tool: uv" >&2
+  exit 1
+fi
+
+PYPDF_VERSION="$(python - <<'PY'
+import pypdf
+print(pypdf.__version__)
+PY
+)"
+
 if [ -n "$FRONTEND_CONFIG_PATH" ]; then
   mkdir -p "$(dirname "$FRONTEND_CONFIG_PATH")"
   cat > "$FRONTEND_CONFIG_PATH" << XCCONFIG
@@ -28,6 +43,8 @@ fi
 
 echo "Stack install complete"
 echo "- Backend venv: $VENV_DIR"
+echo "- Tooling: uv=$(command -v uv)"
+echo "- Python package: pypdf=$PYPDF_VERSION"
 if [ -n "$FRONTEND_CONFIG_PATH" ]; then
   echo "- Frontend config: $FRONTEND_CONFIG_PATH"
 else

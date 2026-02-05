@@ -578,6 +578,62 @@ class ProjectRepository:
         )
         return self.get_run(run_id)
 
+    def recover_orphaned_runs(
+        self,
+        *,
+        active_run_ids: set[str] | None = None,
+        reason: str = "Run interrupted before completion",
+    ) -> int:
+        active_ids = active_run_ids or set()
+        rows = self._fetchall(
+            """
+            SELECT id, conversation_id
+            FROM runs
+            WHERE status IN ('pending', 'running') AND finished_at IS NULL
+            ORDER BY created_at ASC
+            """
+        )
+        if not rows:
+            return 0
+
+        now = utc_now_iso()
+        recovered = 0
+        for row in rows:
+            run_id = str(row["id"])
+            if run_id in active_ids:
+                continue
+
+            self._execute(
+                """
+                UPDATE run_steps
+                SET status='failed', error=COALESCE(error, ?), finished_at=COALESCE(finished_at, ?)
+                WHERE run_id=? AND status='running'
+                """,
+                (reason, now, run_id),
+            )
+
+            self._execute(
+                """
+                UPDATE runs
+                SET status='failed',
+                    output_summary=COALESCE(output_summary, 'Run interrupted'),
+                    error=COALESCE(error, ?),
+                    finished_at=COALESCE(finished_at, ?)
+                WHERE id=?
+                """,
+                (reason, now, run_id),
+            )
+
+            self.add_event(
+                "run_recovered",
+                conversation_id=row.get("conversation_id"),
+                run_id=run_id,
+                payload={"reason": reason},
+            )
+            recovered += 1
+
+        return recovered
+
     def create_run_step(self, run_id: str, step_index: int, step_type: str, input_data: dict[str, Any]) -> str:
         step_id = make_id("step")
         now = utc_now_iso()

@@ -70,6 +70,60 @@ enum JSONValue: Decodable, Hashable {
             return nil
         }
     }
+
+    var intValue: Int? {
+        switch self {
+        case let .number(value):
+            return Int(value)
+        case let .string(value):
+            return Int(value)
+        case let .bool(value):
+            return value ? 1 : 0
+        default:
+            return nil
+        }
+    }
+
+    var boolValue: Bool? {
+        switch self {
+        case let .bool(value):
+            return value
+        case let .string(value):
+            let lowered = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if lowered == "true" {
+                return true
+            }
+            if lowered == "false" {
+                return false
+            }
+            return nil
+        case let .number(value):
+            return value != 0
+        default:
+            return nil
+        }
+    }
+
+    var arrayValue: [JSONValue]? {
+        if case let .array(value) = self {
+            return value
+        }
+        return nil
+    }
+
+    var objectValue: [String: JSONValue]? {
+        if case let .object(value) = self {
+            return value
+        }
+        return nil
+    }
+
+    var stringArrayValue: [String]? {
+        guard case let .array(values) = self else {
+            return nil
+        }
+        return values.compactMap(\.stringValue)
+    }
 }
 
 struct RunStep: Decodable, Identifiable {
@@ -101,6 +155,24 @@ struct RunTodo: Identifiable, Hashable {
     let id: String
     let title: String
     let status: String
+}
+
+struct RunFeedbackEvent: Identifiable, Hashable {
+    let id: String
+    let type: String
+    let title: String
+    let detail: String?
+    let timestamp: String
+}
+
+struct ProjectEvent: Decodable, Identifiable {
+    let id: Int
+    let type: String
+    let projectId: String
+    let conversationId: String?
+    let runId: String?
+    let ts: String
+    let payload: [String: JSONValue]
 }
 
 struct TaskStatus: Decodable {

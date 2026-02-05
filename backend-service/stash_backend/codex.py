@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shlex
 import subprocess
+import sysconfig
 from pathlib import Path
 
 from .config import Settings
@@ -15,6 +17,7 @@ from .utils import ensure_inside, stable_slug, utc_now_iso
 
 TAG_RE = re.compile(r"<codex_cmd>(.*?)</codex_cmd>", flags=re.DOTALL | re.IGNORECASE)
 logger = logging.getLogger(__name__)
+CODEX_EXEC_REASONING_EFFORT = "low"
 
 ALLOWED_PREFIXES = {
     "ls",
@@ -112,12 +115,12 @@ class CodexExecutor:
             if raw.is_absolute():
                 target = raw.resolve()
             else:
-                target = (worktree_path / raw).resolve()
+                # Relative cwd is project-root relative so planner output like "." maps to user files.
+                target = (context.root_path / raw).resolve()
         else:
-            target = worktree_path.resolve()
+            target = context.root_path.resolve()
 
         if ensure_inside(context.root_path, target) or ensure_inside(worktree_path, target):
-            target.mkdir(parents=True, exist_ok=True)
             return target
 
         raise CodexCommandError("Resolved cwd escapes project root/worktree boundary")
@@ -143,10 +146,11 @@ class CodexExecutor:
             f"{command}\n"
         )
 
-    def _run_command_via_shell(self, *, cwd: Path, command: str) -> tuple[int, str, str]:
+    def _run_command_via_shell(self, *, cwd: Path, command: str, env: dict[str, str]) -> tuple[int, str, str]:
         proc = subprocess.run(
             ["bash", "-lc", command],
             cwd=str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             timeout=600,
@@ -204,6 +208,7 @@ class CodexExecutor:
         command: str,
         codex_bin: str,
         codex_model: str | None,
+        env: dict[str, str],
     ) -> tuple[int, str, str]:
         prompt = self._build_codex_exec_prompt(command)
         cmdline = [
@@ -215,6 +220,8 @@ class CodexExecutor:
             "workspace-write",
             "-C",
             str(cwd),
+            "-c",
+            f'reasoning.effort="{CODEX_EXEC_REASONING_EFFORT}"',
         ]
         if codex_model:
             cmdline.extend(["-m", codex_model])
@@ -223,6 +230,7 @@ class CodexExecutor:
         proc = subprocess.run(
             cmdline,
             cwd=str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             timeout=600,
@@ -247,6 +255,7 @@ class CodexExecutor:
                     command=command,
                     codex_bin=codex_bin,
                     codex_model=None,
+                    env=env,
                 )
             return proc.returncode, "", stderr
 
@@ -270,6 +279,29 @@ class CodexExecutor:
 
         started_at = utc_now_iso()
         engine = "shell"
+        runtime_cache_dir = context.stash_dir / "runtime-cache"
+        uv_cache_dir = runtime_cache_dir / "uv"
+        runtime_cache_dir.mkdir(parents=True, exist_ok=True)
+        uv_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        exec_env = dict(os.environ)
+        exec_env["UV_CACHE_DIR"] = str(uv_cache_dir)
+        exec_env.setdefault("XDG_CACHE_HOME", str(runtime_cache_dir))
+        venv_scripts = sysconfig.get_path("scripts")
+        if venv_scripts:
+            existing_path = exec_env.get("PATH", "")
+            if existing_path:
+                exec_env["PATH"] = f"{venv_scripts}{os.pathsep}{existing_path}"
+            else:
+                exec_env["PATH"] = venv_scripts
+        venv_purelib = sysconfig.get_paths().get("purelib")
+        if venv_purelib:
+            existing_pythonpath = exec_env.get("PYTHONPATH", "")
+            if existing_pythonpath:
+                exec_env["PYTHONPATH"] = f"{venv_purelib}{os.pathsep}{existing_pythonpath}"
+            else:
+                exec_env["PYTHONPATH"] = str(venv_purelib)
+
         logger.info(
             "Executing command mode=%s worktree=%s cwd=%s cmd=%s",
             runtime.codex_mode,
@@ -288,15 +320,16 @@ class CodexExecutor:
                     command=command.cmd,
                     codex_bin=resolved_codex,
                     codex_model=runtime.codex_planner_model,
+                    env=exec_env,
                 )
                 engine = "codex-cli"
             else:
-                exit_code, stdout, stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
+                exit_code, stdout, stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd, env=exec_env)
                 engine = "shell"
         except FileNotFoundError:
             if runtime.codex_mode == "cli":
                 # Fallback keeps the pipeline functional when codex binary is missing.
-                exit_code, stdout, shell_stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
+                exit_code, stdout, shell_stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd, env=exec_env)
                 stderr = f"codex binary not found; executed via shell fallback\n{shell_stderr}"
                 engine = "shell-fallback"
                 logger.warning("Codex binary missing; used shell fallback")

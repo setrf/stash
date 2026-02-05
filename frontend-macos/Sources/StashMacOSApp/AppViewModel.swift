@@ -4,6 +4,16 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    struct CodexModelPreset: Identifiable, Hashable {
+        let value: String
+        let label: String
+        let hint: String
+
+        var id: String {
+            value.isEmpty ? "__default__" : value
+        }
+    }
+
     @Published var backendConnected = false
     @Published var backendStatusText = "Backend offline"
 
@@ -23,7 +33,9 @@ final class AppViewModel: ObservableObject {
     @Published var indexingStatusText: String?
     @Published var runThinkingText: String?
     @Published var runPlanningText: String?
+    @Published var runPlannerPreview: String?
     @Published var runTodos: [RunTodo] = []
+    @Published var runFeedbackEvents: [RunFeedbackEvent] = []
     @Published var mentionSuggestions: [FileItem] = []
     @Published var mentionedFilePaths: [String] = []
     @Published var setupStatus: RuntimeSetupStatus?
@@ -33,9 +45,9 @@ final class AppViewModel: ObservableObject {
     @Published var setupPlannerBackend = "auto"
     @Published var setupCodexMode = "cli"
     @Published var setupCodexBin = "codex"
-    @Published var setupCodexPlannerModel = "gpt-5"
+    @Published var setupCodexPlannerModel = "gpt-5.3-codex"
     @Published var setupPlannerCmd = ""
-    @Published var setupPlannerTimeoutSeconds = "150"
+    @Published var setupPlannerTimeoutSeconds = "60"
     @Published var setupOpenAIAPIKey = ""
     @Published var setupOpenAIModel = "gpt-5"
     @Published var setupOpenAIBaseURL = "https://api.openai.com/v1"
@@ -46,6 +58,7 @@ final class AppViewModel: ObservableObject {
     @Published var errorText: String?
 
     private var runPollTask: Task<Void, Never>?
+    private var runEventStreamTask: Task<Void, Never>?
     private var filePollTask: Task<Void, Never>?
     private var indexStatusClearTask: Task<Void, Never>?
     private var lastFileSignature: Int?
@@ -56,13 +69,28 @@ final class AppViewModel: ObservableObject {
     private let changeIndexCooldownSeconds: TimeInterval = 4
     private let maxMentionedFiles = 6
     private let maxMentionExcerptChars = 3500
+    private let feedbackSourceFormatter = ISO8601DateFormatter()
+    private let feedbackClockFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
     private let lastProjectBookmarkKey = "stash.lastProjectFolderBookmark"
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
+    private let recommendedCodexModel = "gpt-5.3-codex"
     private let initialProjectRootURL: URL?
     private var activeSecurityScopedProjectURL: URL?
+    private var activeRunID: String?
+    private var lastRunEventID = 0
     private var client: BackendClient
+    private let baseCodexModelPresets: [CodexModelPreset] = [
+        CodexModelPreset(value: "gpt-5.3-codex", label: "GPT-5.3 Codex (medium)", hint: "Recommended default"),
+        CodexModelPreset(value: "gpt-5.3-codex-low", label: "GPT-5.3 Codex (low)", hint: "Fastest"),
+        CodexModelPreset(value: "gpt-5.3-codex-high", label: "GPT-5.3 Codex (high)", hint: "Best quality"),
+        CodexModelPreset(value: "", label: "CLI default (latest)", hint: "Use your Codex CLI default"),
+    ]
 
     init(initialProjectRootURL: URL? = nil) {
         self.initialProjectRootURL = initialProjectRootURL
@@ -72,6 +100,7 @@ final class AppViewModel: ObservableObject {
 
     deinit {
         runPollTask?.cancel()
+        runEventStreamTask?.cancel()
         filePollTask?.cancel()
         indexStatusClearTask?.cancel()
         if let activeSecurityScopedProjectURL {
@@ -105,6 +134,22 @@ final class AppViewModel: ObservableObject {
             $0.relativePath.localizedCaseInsensitiveContains(trimmed) ||
                 $0.name.localizedCaseInsensitiveContains(trimmed)
         }
+    }
+
+    var visibleMessages: [Message] {
+        messages.filter {
+            let role = $0.role.lowercased()
+            return role == "user" || role == "assistant"
+        }
+    }
+
+    var codexModelPresets: [CodexModelPreset] {
+        var presets = baseCodexModelPresets
+        let current = setupCodexPlannerModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !current.isEmpty, !presets.contains(where: { $0.value.caseInsensitiveCompare(current) == .orderedSame }) {
+            presets.append(CodexModelPreset(value: current, label: "Custom: \(current)", hint: "Persisted custom value"))
+        }
+        return presets
     }
 
     func composerDidChange() {
@@ -200,7 +245,7 @@ final class AppViewModel: ObservableObject {
             setupPlannerBackend = config.plannerBackend
             setupCodexMode = config.codexMode
             setupCodexBin = status.codexBinResolved ?? config.codexBin
-            setupCodexPlannerModel = config.codexPlannerModel
+            setupCodexPlannerModel = suggestedCodexPlannerModel(config.codexPlannerModel)
             setupPlannerCmd = config.plannerCmd ?? ""
             setupPlannerTimeoutSeconds = String(config.plannerTimeoutSeconds)
             setupOpenAIModel = config.openaiModel
@@ -237,16 +282,18 @@ final class AppViewModel: ObservableObject {
         defer { setupSaving = false }
 
         let openAIKeyTrimmed = setupOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let codexModelTrimmed = setupCodexPlannerModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let codexModelToPersist = normalizedLegacyCodexPlannerModel(codexModelTrimmed)
 
         do {
             _ = try await client.updateRuntimeConfig(
                 plannerBackend: "auto",
                 codexMode: "cli",
                 codexBin: setupCodexBin.isEmpty ? "codex" : setupCodexBin,
-                codexPlannerModel: "",
+                codexPlannerModel: codexModelToPersist,
                 plannerCmd: nil,
                 clearPlannerCmd: true,
-                plannerTimeoutSeconds: 150,
+                plannerTimeoutSeconds: 60,
                 openaiAPIKey: openAIKeyTrimmed.isEmpty ? nil : openAIKeyTrimmed,
                 clearOpenAIAPIKey: false,
                 openaiModel: "gpt-5",
@@ -265,6 +312,24 @@ final class AppViewModel: ObservableObject {
         } catch {
             setupStatusText = "Could not save setup: \(setupErrorMessage(from: error))"
         }
+    }
+
+    private func suggestedCodexPlannerModel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return recommendedCodexModel
+        }
+        return normalizedLegacyCodexPlannerModel(trimmed)
+    }
+
+    private func normalizedLegacyCodexPlannerModel(_ value: String) -> String {
+        if value.caseInsensitiveCompare("gpt-5") == .orderedSame {
+            return recommendedCodexModel
+        }
+        if value.caseInsensitiveCompare("gpt-5-codex") == .orderedSame {
+            return recommendedCodexModel
+        }
+        return value
     }
 
     private func setupErrorMessage(from error: Error) -> String {
@@ -308,9 +373,10 @@ final class AppViewModel: ObservableObject {
             )
             project = opened
             projectRootURL = prepared.url
-            runThinkingText = nil
-            runPlanningText = nil
-            runTodos = []
+            runPollTask?.cancel()
+            stopRunEventStream()
+            activeRunID = nil
+            resetRunFeedback(clearEvents: true)
             rememberProjectSelection(url: prepared.url, bookmarkData: prepared.bookmarkData)
             activatePreparedAccess(prepared)
 
@@ -340,6 +406,56 @@ final class AppViewModel: ObservableObject {
 
         Task { await processDroppedFiles(providers: providers, toRelativeDirectory: relativeDirectory) }
         return true
+    }
+
+    func openFileItemInOS(_ item: FileItem) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        let itemURL = projectRootURL
+            .appendingPathComponent(item.relativePath)
+            .standardizedFileURL
+        guard FileManager.default.fileExists(atPath: itemURL.path) else {
+            errorText = "File no longer exists: \(item.relativePath)"
+            return
+        }
+
+        if !NSWorkspace.shared.open(itemURL) {
+            errorText = "Could not open in macOS: \(item.relativePath)"
+        }
+    }
+
+    func openTaggedOutputPathInOS(_ rawPath: String) {
+        guard let projectRootURL else {
+            errorText = "Open a project folder first."
+            return
+        }
+
+        let cleaned = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+
+        let expanded = NSString(string: cleaned).expandingTildeInPath
+        let root = projectRootURL.standardizedFileURL
+        let targetURL: URL
+        if expanded.hasPrefix("/") {
+            targetURL = URL(fileURLWithPath: expanded).standardizedFileURL
+        } else {
+            targetURL = root.appendingPathComponent(cleaned).standardizedFileURL
+        }
+
+        guard isInsideProject(targetURL, root: root) else {
+            errorText = "Blocked opening path outside project: \(cleaned)"
+            return
+        }
+        guard FileManager.default.fileExists(atPath: targetURL.path) else {
+            errorText = "Output file not found: \(cleaned)"
+            return
+        }
+        if !NSWorkspace.shared.open(targetURL) {
+            errorText = "Could not open output file: \(cleaned)"
+        }
     }
 
     private struct PreparedProjectAccess {
@@ -671,6 +787,7 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        detachRunTrackingFromCurrentConversation()
         let title = "Session \(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short))"
         do {
             let conv = try await client.createConversation(projectID: projectID, title: title)
@@ -684,6 +801,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func selectConversation(id: String) async {
+        detachRunTrackingFromCurrentConversation()
         selectedConversationID = id
         await loadMessages(conversationID: id)
     }
@@ -692,18 +810,23 @@ final class AppViewModel: ObservableObject {
         guard let projectID = project?.id else { return }
         do {
             let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
+            guard selectedConversationID == conversationID else { return }
             messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
             errorText = nil
         } catch BackendError.requestTimedOut {
+            guard selectedConversationID == conversationID else { return }
             errorText = "Could not load messages in time. Retrying..."
             do {
                 let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
+                guard selectedConversationID == conversationID else { return }
                 messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
                 errorText = nil
             } catch {
+                guard selectedConversationID == conversationID else { return }
                 errorText = "Could not load messages: \(error.localizedDescription)"
             }
         } catch {
+            guard selectedConversationID == conversationID else { return }
             errorText = "Could not load messages: \(error.localizedDescription)"
         }
     }
@@ -899,23 +1022,296 @@ final class AppViewModel: ObservableObject {
 
     private func updateRunFeedback(run: RunDetail) {
         let steps = run.steps ?? []
-        if run.status.lowercased() == "running" {
-            runThinkingText = "Thinking and planning..."
-        } else if ["done", "failed", "cancelled"].contains(run.status.lowercased()) {
+        let status = run.status.lowercased()
+        if status == "running" {
+            if runThinkingText == nil {
+                runThinkingText = "Thinking and planning..."
+            }
+            if runPlanningText == nil {
+                runPlanningText = steps.isEmpty ? "Planning next actions..." : "Executing planned steps..."
+            }
+        } else if ["done", "failed", "cancelled"].contains(status) {
             runThinkingText = nil
         }
 
         if steps.isEmpty {
-            runPlanningText = run.status.lowercased() == "running" ? "Planning next actions..." : nil
-            runTodos = []
+            if status != "running", runTodos.isEmpty {
+                runPlanningText = nil
+            }
             return
         }
 
-        runPlanningText = "Planned \(steps.count) step(s)"
         runTodos = steps.map { step in
             let command = step.input["cmd"]?.stringValue ?? step.stepType
             return RunTodo(id: step.id, title: command, status: step.status)
         }
+        if status == "running" {
+            runPlanningText = "Planned \(steps.count) step(s)"
+        }
+    }
+
+    private func resetRunFeedback(clearEvents: Bool) {
+        runThinkingText = nil
+        runPlanningText = nil
+        runPlannerPreview = nil
+        runTodos = []
+        if clearEvents {
+            runFeedbackEvents = []
+            lastRunEventID = 0
+        }
+    }
+
+    private func appendRunFeedbackEvent(
+        type: String,
+        title: String,
+        detail: String? = nil,
+        timestampISO: String? = nil
+    ) {
+        let isoText = timestampISO ?? ISO8601DateFormatter().string(from: Date())
+        let displayTime: String
+        if let parsed = feedbackSourceFormatter.date(from: isoText) {
+            displayTime = feedbackClockFormatter.string(from: parsed)
+        } else {
+            displayTime = isoText
+        }
+
+        let event = RunFeedbackEvent(
+            id: "event-\(lastRunEventID)-\(runFeedbackEvents.count + 1)-\(UUID().uuidString)",
+            type: type,
+            title: title,
+            detail: detail,
+            timestamp: displayTime
+        )
+        runFeedbackEvents.append(event)
+        if runFeedbackEvents.count > 120 {
+            runFeedbackEvents.removeFirst(runFeedbackEvents.count - 120)
+        }
+    }
+
+    private func sanitizePlannerPreview(_ raw: String) -> String {
+        guard !raw.isEmpty else {
+            return ""
+        }
+        guard let regex = try? NSRegularExpression(
+            pattern: "<codex_cmd(?:\\s+[^>]*)?>[\\s\\S]*?<\\/codex_cmd>",
+            options: [.caseInsensitive]
+        ) else {
+            return raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let nsRange = NSRange(raw.startIndex ..< raw.endIndex, in: raw)
+        let stripped = regex.stringByReplacingMatches(in: raw, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func updateTodoStatus(stepIndex: Int, status: String, fallbackTitle: String? = nil) {
+        guard stepIndex > 0 else { return }
+        let index = stepIndex - 1
+        if index < runTodos.count {
+            let existing = runTodos[index]
+            runTodos[index] = RunTodo(id: existing.id, title: existing.title, status: status)
+            return
+        }
+        let title = fallbackTitle ?? "Step \(stepIndex)"
+        runTodos.append(RunTodo(id: "step-\(stepIndex)", title: title, status: status))
+    }
+
+    private func applyRunEvent(_ event: ProjectEvent, expectedRunID: String) {
+        lastRunEventID = max(lastRunEventID, event.id)
+
+        guard activeRunID == expectedRunID else { return }
+        guard event.runId == nil || event.runId == expectedRunID else { return }
+
+        switch event.type {
+        case "run_started":
+            runThinkingText = "Thinking and planning..."
+            runPlanningText = "Gathering indexed context..."
+            appendRunFeedbackEvent(
+                type: "status",
+                title: "Run started",
+                detail: nil,
+                timestampISO: event.ts
+            )
+
+        case "run_planned":
+            let commandCount = event.payload["command_count"]?.intValue ?? 0
+            let ragHitCount = event.payload["rag_hit_count"]?.intValue ?? 0
+            let plannerPreview = sanitizePlannerPreview(event.payload["planner_preview"]?.stringValue ?? "")
+            let backend = event.payload["used_backend"]?.stringValue ?? "unknown"
+            let fallback = event.payload["used_fallback"]?.stringValue
+            let timedOutPrimary = event.payload["timed_out_primary"]?.boolValue ?? false
+            runPlannerPreview = plannerPreview.isEmpty ? nil : plannerPreview
+            if let commands = event.payload["commands"]?.stringArrayValue, !commands.isEmpty {
+                runTodos = commands.enumerated().map { index, command in
+                    RunTodo(id: "planned-\(index + 1)", title: command, status: "pending")
+                }
+            }
+            runThinkingText = "Plan generated"
+            runPlanningText = commandCount > 0 ? "Executing \(commandCount) planned step(s)..." : "No runnable steps in plan."
+            var planDetail = "Commands: \(max(commandCount, runTodos.count)) • Indexed hits: \(ragHitCount) • Backend: \(backend)"
+            if let fallback, !fallback.isEmpty {
+                planDetail += " • Fallback: \(fallback)"
+            }
+            if timedOutPrimary {
+                planDetail += " • Primary timeout recovered"
+            }
+            appendRunFeedbackEvent(
+                type: "planning",
+                title: "Plan ready",
+                detail: planDetail,
+                timestampISO: event.ts
+            )
+
+        case "run_planning_delayed":
+            let elapsed = event.payload["elapsed_ms"]?.intValue ?? 0
+            runThinkingText = "Planning is taking longer..."
+            runPlanningText = "Continuing in background while planner works."
+            appendRunFeedbackEvent(
+                type: "planning",
+                title: "Planning delayed",
+                detail: "Elapsed: \(elapsed) ms",
+                timestampISO: event.ts
+            )
+
+        case "run_step_started":
+            let stepIndex = event.payload["step_index"]?.intValue ?? 0
+            let executionMode = event.payload["execution_mode"]?.stringValue
+            if stepIndex > 0 {
+                updateTodoStatus(stepIndex: stepIndex, status: "running")
+            }
+            let stepTitle: String?
+            if stepIndex > 0, stepIndex - 1 < runTodos.count {
+                stepTitle = runTodos[stepIndex - 1].title
+            } else {
+                stepTitle = nil
+            }
+            var detail = stepTitle
+            if let executionMode, !executionMode.isEmpty {
+                detail = [detail, "mode=\(executionMode)"]
+                    .compactMap { $0 }
+                    .joined(separator: " • ")
+            }
+            appendRunFeedbackEvent(
+                type: "execution",
+                title: stepIndex > 0 ? "Step \(stepIndex) started" : "Step started",
+                detail: detail,
+                timestampISO: event.ts
+            )
+
+        case "run_step_completed":
+            let stepIndex = event.payload["step_index"]?.intValue ?? 0
+            let status = (event.payload["status"]?.stringValue ?? "completed").lowercased()
+            let executionMode = event.payload["execution_mode"]?.stringValue
+            if stepIndex > 0 {
+                updateTodoStatus(stepIndex: stepIndex, status: status)
+            }
+            let errorDetail = event.payload["error"]?.stringValue
+            let runtimeDetail = event.payload["detail"]?.stringValue
+            let exitCode = event.payload["exit_code"]?.intValue
+            let baseDetail = errorDetail ?? runtimeDetail ?? (exitCode != nil ? "exit_code=\(exitCode ?? 0)" : nil)
+            let detail: String?
+            if let executionMode, !executionMode.isEmpty {
+                let prefix = "mode=\(executionMode)"
+                if let baseDetail, !baseDetail.isEmpty {
+                    detail = "\(prefix) • \(baseDetail)"
+                } else {
+                    detail = prefix
+                }
+            } else {
+                detail = baseDetail
+            }
+            appendRunFeedbackEvent(
+                type: status == "failed" ? "error" : "execution",
+                title: stepIndex > 0 ? "Step \(stepIndex) \(status)" : "Step \(status)",
+                detail: detail,
+                timestampISO: event.ts
+            )
+
+        case "run_completed":
+            runThinkingText = nil
+            runPlanningText = "Run completed."
+            appendRunFeedbackEvent(type: "status", title: "Run completed", detail: nil, timestampISO: event.ts)
+
+        case "run_failed":
+            runThinkingText = nil
+            runPlanningText = "Run failed."
+            let failures = event.payload["failures"]?.intValue
+            let detail = failures != nil ? "\(failures ?? 0) step(s) failed" : nil
+            appendRunFeedbackEvent(type: "error", title: "Run failed", detail: detail, timestampISO: event.ts)
+
+        case "run_latency_summary":
+            let planning = event.payload["planning_ms"]?.intValue ?? 0
+            let execution = event.payload["execution_ms"]?.intValue ?? 0
+            let synthesis = event.payload["synthesis_ms"]?.intValue ?? 0
+            let ragScan = event.payload["rag_scan_ms"]?.intValue ?? 0
+            let ragSearch = event.payload["rag_search_ms"]?.intValue ?? 0
+            let total = event.payload["total_ms"]?.intValue ?? 0
+            appendRunFeedbackEvent(
+                type: "status",
+                title: "Latency summary",
+                detail: "plan=\(planning)ms • exec=\(execution)ms • synth=\(synthesis)ms • rag=\(ragScan + ragSearch)ms • total=\(total)ms",
+                timestampISO: event.ts
+            )
+
+        case "run_cancelled":
+            runThinkingText = nil
+            runPlanningText = "Run cancelled."
+            appendRunFeedbackEvent(type: "status", title: "Run cancelled", detail: nil, timestampISO: event.ts)
+
+        default:
+            break
+        }
+    }
+
+    private func startRunEventStream(projectID: String, conversationID: String, runID: String) {
+        runEventStreamTask?.cancel()
+        runEventStreamTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled, self.activeRunID == runID {
+                do {
+                    try await self.client.streamEvents(
+                        projectID: projectID,
+                        conversationID: conversationID,
+                        sinceID: self.lastRunEventID
+                    ) { event in
+                        Task { @MainActor [weak self] in
+                            self?.applyRunEvent(event, expectedRunID: runID)
+                        }
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.activeRunID == runID, self.runInProgress else {
+                        return
+                    }
+                    self.appendRunFeedbackEvent(
+                        type: "status",
+                        title: "Live feed reconnecting...",
+                        detail: error.localizedDescription
+                    )
+                    try? await Task.sleep(for: .seconds(1))
+                }
+
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
+    private func stopRunEventStream() {
+        runEventStreamTask?.cancel()
+        runEventStreamTask = nil
+    }
+
+    private func detachRunTrackingFromCurrentConversation() {
+        runPollTask?.cancel()
+        runPollTask = nil
+        stopRunEventStream()
+        activeRunID = nil
+        runInProgress = false
+        runStatusText = nil
+        resetRunFeedback(clearEvents: true)
     }
 
     func sendComposerMessage() async {
@@ -946,9 +1342,10 @@ final class AppViewModel: ObservableObject {
         }
 
         let mentionParts = buildMentionParts(from: content)
+        resetRunFeedback(clearEvents: true)
         runThinkingText = "Thinking and planning..."
-        runPlanningText = "Planning next actions..."
-        runTodos = []
+        runPlanningText = "Waiting for planner..."
+        appendRunFeedbackEvent(type: "status", title: "Prompt sent", detail: "Starting run...")
         let optimisticID = "local-\(UUID().uuidString)"
         let optimisticMessage = Message(
             id: optimisticID,
@@ -991,21 +1388,33 @@ final class AppViewModel: ObservableObject {
 
     private func pollRun(projectID: String, conversationID: String, runID: String) async {
         runPollTask?.cancel()
+        stopRunEventStream()
+        activeRunID = runID
+        lastRunEventID = 0
         runInProgress = true
         runStatusText = "Running..."
+        startRunEventStream(projectID: projectID, conversationID: conversationID, runID: runID)
 
         runPollTask = Task {
+            var transientPollErrors = 0
+            var timeoutPollStreak = 0
             defer {
                 Task { @MainActor in
                     self.runInProgress = false
+                    if self.activeRunID == runID {
+                        self.stopRunEventStream()
+                        self.activeRunID = nil
+                    }
                 }
             }
 
-            for _ in 0 ..< 180 {
+            for _ in 0 ..< 600 {
                 if Task.isCancelled { return }
 
                 do {
                     let run = try await self.client.run(projectID: projectID, runID: runID)
+                    transientPollErrors = 0
+                    timeoutPollStreak = 0
                     await MainActor.run {
                         self.runStatusText = "Run \(run.status)"
                         self.updateRunFeedback(run: run)
@@ -1015,14 +1424,52 @@ final class AppViewModel: ObservableObject {
                         await MainActor.run {
                             self.runStatusText = run.status.uppercased() + (run.error.map { ": \($0)" } ?? "")
                         }
-                        await self.loadMessages(conversationID: conversationID)
+                        if self.selectedConversationID == conversationID {
+                            await self.loadMessages(conversationID: conversationID)
+                        }
                         return
                     }
                 } catch {
+                    let isTimeout: Bool
+                    if case BackendError.requestTimedOut = error {
+                        isTimeout = true
+                    } else {
+                        isTimeout = false
+                    }
+                    if isTimeout {
+                        timeoutPollStreak += 1
+                        await MainActor.run {
+                            self.runStatusText = "Run still processing..."
+                            if timeoutPollStreak == 1 || timeoutPollStreak % 10 == 0 {
+                                self.appendRunFeedbackEvent(
+                                    type: "status",
+                                    title: "Waiting for backend...",
+                                    detail: "Poll timeout, retrying"
+                                )
+                            }
+                        }
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
+                    }
+
+                    transientPollErrors += 1
+                    if transientPollErrors < 8 {
+                        await MainActor.run {
+                            self.runStatusText = "Run still processing..."
+                            self.appendRunFeedbackEvent(
+                                type: "status",
+                                title: "Temporary run polling issue",
+                                detail: error.localizedDescription
+                            )
+                        }
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
+                    }
+
                     await MainActor.run {
                         self.runThinkingText = nil
-                        self.runPlanningText = nil
-                        self.runTodos = []
+                        self.runPlanningText = "Run polling failed."
+                        self.appendRunFeedbackEvent(type: "error", title: "Run polling failed", detail: error.localizedDescription)
                         self.errorText = "Run polling failed: \(error.localizedDescription)"
                     }
                     return
@@ -1031,9 +1478,26 @@ final class AppViewModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(600))
             }
 
+            do {
+                let finalRun = try await self.client.run(projectID: projectID, runID: runID)
+                if ["done", "failed", "cancelled"].contains(finalRun.status.lowercased()) {
+                    await MainActor.run {
+                        self.runStatusText = finalRun.status.uppercased() + (finalRun.error.map { ": \($0)" } ?? "")
+                    }
+                    if self.selectedConversationID == conversationID {
+                        await self.loadMessages(conversationID: conversationID)
+                    }
+                    return
+                }
+            } catch {
+                // Ignore final probe failure and show non-fatal background state below.
+            }
+
             await MainActor.run {
-                self.runStatusText = "Run timed out"
-                self.runThinkingText = nil
+                self.runStatusText = "Still running in background"
+                self.runThinkingText = "Continuing in background..."
+                self.runPlanningText = "This run is taking longer than expected. You can keep working and it will finish."
+                self.appendRunFeedbackEvent(type: "status", title: "Run still processing", detail: "No final status yet")
             }
         }
     }

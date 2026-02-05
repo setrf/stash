@@ -22,6 +22,8 @@ Package.resolved
 
 # Packaging artifacts
 *.egg-info/
+__pycache__/
+*.py[cod]
 
 # SwiftPM artifacts
 frontend-macos/.build/

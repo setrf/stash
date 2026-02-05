@@ -51,6 +51,7 @@ def is_codex_model_config_error(output: str) -> bool:
 
 def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
     resolved = resolve_binary(runtime.codex_bin)
+    uv_resolved = resolve_binary("uv")
     openai_api_key_set = bool(runtime.openai_api_key)
     status: dict[str, Any] = {
         "planner_backend": runtime.planner_backend,
@@ -58,6 +59,11 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
         "codex_bin": runtime.codex_bin,
         "codex_bin_resolved": resolved,
         "codex_available": resolved is not None,
+        "planner_mode": runtime.planner_mode,
+        "execution_parallel_reads_enabled": runtime.execution_parallel_reads_enabled,
+        "execution_parallel_reads_max_workers": runtime.execution_parallel_reads_max_workers,
+        "uv_bin_resolved": uv_resolved,
+        "uv_available": uv_resolved is not None,
         "planner_cmd_configured": bool(runtime.planner_cmd),
         "codex_planner_model": runtime.codex_planner_model or "",
         "openai_api_key_set": openai_api_key_set,
@@ -85,8 +91,8 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
             )
             raw = ((proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")).strip()
             status["login_checked"] = True
-            status["login_ok"] = proc.returncode == 0 and bool(raw)
-            status["detail"] = raw[:1000]
+            status["login_ok"] = proc.returncode == 0
+            status["detail"] = (raw[:1000] if raw else "Codex login check executed.")
             status["login_exit_code"] = int(proc.returncode)
         except Exception as exc:
             status["login_checked"] = True
@@ -113,6 +119,9 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
         if not codex_ready and not openai_ready:
             required_blockers.append("No AI planner is ready. Sign in to Codex CLI or add an OpenAI API key.")
             needs_openai_key = True
+
+    if uv_resolved is None:
+        recommendations.append("Missing `uv` CLI in backend runtime PATH. Re-run installer (`./scripts/install_stack.sh`) to provision runtime tools.")
 
     status["planner_ready"] = not required_blockers
     status["required_blockers"] = required_blockers

@@ -10,7 +10,9 @@ From repo root:
 ./scripts/install_stack.sh
 ```
 
-This creates `.venv/`, installs backend dependencies, and writes `.env.local` with:
+This creates `.venv/`, installs backend dependencies, and provisions runtime tools (including `uv`) plus local document packages (including `pypdf`) in that environment.
+
+If you set `STASH_FRONTEND_CONFIG_PATH`, install also writes frontend backend URL config:
 
 ```text
 STASH_BACKEND_URL=http://127.0.0.1:8765

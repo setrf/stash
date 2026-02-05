@@ -55,6 +55,8 @@ uvicorn stash_backend.main:app --host 127.0.0.1 --port 8765 --reload
 ./scripts/run_backend.sh
 ```
 
+`install_stack.sh` provisions backend runtime tooling inside `.venv/`, including `uv` and `pypdf`.
+
 Optional frontend config generation during install:
 
 ```bash
