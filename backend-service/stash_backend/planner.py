@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 import time
 from typing import Any
@@ -10,6 +9,7 @@ from urllib import error, request
 
 from .codex import ALLOWED_PREFIXES, parse_tagged_commands
 from .config import Settings
+from .integrations import resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import PlanResult
 
@@ -79,7 +79,7 @@ class Planner:
         return bool(runtime.openai_api_key and runtime.openai_model)
 
     def _codex_available(self, *, runtime: RuntimeConfig) -> bool:
-        return shutil.which(runtime.codex_bin) is not None
+        return resolve_binary(runtime.codex_bin) is not None
 
     def _extract_agent_message_from_jsonl(self, output: str) -> str | None:
         last_message = ""
@@ -290,8 +290,13 @@ class Planner:
             require_commands=require_commands,
         )
 
+        resolved_codex = resolve_binary(runtime.codex_bin)
+        if not resolved_codex:
+            logger.warning("Codex planner unavailable: binary '%s' not found", runtime.codex_bin)
+            return None
+
         cmdline = [
-            runtime.codex_bin,
+            resolved_codex,
             "exec",
             "--json",
             "--skip-git-repo-check",

@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Settings
+from .integrations import resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .types import ExecutionResult, ProjectContext, TaggedCommand
 from .utils import ensure_inside, stable_slug, utc_now_iso
@@ -262,10 +263,13 @@ class CodexExecutor:
 
         try:
             if runtime.codex_mode == "cli":
+                resolved_codex = resolve_binary(runtime.codex_bin)
+                if not resolved_codex:
+                    raise FileNotFoundError(runtime.codex_bin)
                 exit_code, stdout, stderr = self._run_command_via_codex_cli(
                     cwd=cwd,
                     command=command.cmd,
-                    codex_bin=runtime.codex_bin,
+                    codex_bin=resolved_codex,
                     codex_model=runtime.codex_planner_model,
                 )
                 engine = "codex-cli"

@@ -15,6 +15,7 @@ BACKEND_VENV="$RUNTIME_BASE/.venv"
 BACKEND_CODEX_MODE="${STASH_CODEX_MODE:-cli}"
 ICON_SOURCE="${STASH_ICON_SOURCE:-$ROOT_DIR/frontend-macos/Resources/AppIcon-source.png}"
 ICON_ICNS="${STASH_ICON_ICNS:-$ROOT_DIR/frontend-macos/Resources/AppIcon.icns}"
+BACKEND_CODEX_BIN=""
 
 log() {
   printf '[stash-installer] %s\n' "$1"
@@ -35,6 +36,27 @@ find_frontend_release_binary() {
   printf '%s' "$candidate"
 }
 
+resolve_codex_binary() {
+  if [ -n "${STASH_CODEX_BIN:-}" ] && [ -x "${STASH_CODEX_BIN:-}" ]; then
+    printf '%s' "${STASH_CODEX_BIN:-}"
+    return
+  fi
+
+  if command -v codex >/dev/null 2>&1; then
+    command -v codex
+    return
+  fi
+
+  for candidate in /opt/homebrew/bin/codex /usr/local/bin/codex "$HOME/.local/bin/codex"; do
+    if [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+
+  printf '%s' "codex"
+}
+
 if [ ! -d "$ROOT_DIR/frontend-macos" ]; then
   echo "frontend-macos folder is missing. Cannot build desktop app." >&2
   exit 1
@@ -50,6 +72,9 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+BACKEND_CODEX_BIN="$(resolve_codex_binary)"
+log "Using Codex CLI binary: $BACKEND_CODEX_BIN"
+
 log "Preparing backend runtime at $BACKEND_VENV"
 mkdir -p "$RUNTIME_BASE"
 python3 -m venv "$BACKEND_VENV"
@@ -63,7 +88,7 @@ deactivate >/dev/null 2>&1 || true
 log "Building frontend release binary"
 (
   cd "$ROOT_DIR/frontend-macos"
-  swift build -c release
+  swift build -c release --product StashMacOSApp
 )
 
 if [ -f "$ICON_SOURCE" ]; then
@@ -132,6 +157,7 @@ cat > "$APP_RESOURCES/launcher.conf" << EOF_CONF
 STASH_BACKEND_VENV="$BACKEND_VENV"
 STASH_BACKEND_URL="$BACKEND_URL"
 STASH_CODEX_MODE="$BACKEND_CODEX_MODE"
+STASH_CODEX_BIN="$BACKEND_CODEX_BIN"
 EOF_CONF
 
 cat > "$APP_MACOS/StashDesktopLauncher" << 'EOF_LAUNCHER'
@@ -155,6 +181,13 @@ LOG_DIR="$HOME/Library/Logs/StashLocal"
 STATE_DIR="$HOME/Library/Application Support/StashLocal"
 BACKEND_PID_FILE="$STATE_DIR/backend.pid"
 mkdir -p "$LOG_DIR" "$STATE_DIR"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$HOME/bin:$PATH"
+if [ -n "${STASH_CODEX_BIN:-}" ]; then
+  CODEX_DIR="$(dirname "$STASH_CODEX_BIN")"
+  if [ -d "$CODEX_DIR" ]; then
+    export PATH="$CODEX_DIR:$PATH"
+  fi
+fi
 
 health_ok() {
   curl -fsS "$STASH_BACKEND_URL/health" >/dev/null 2>&1
@@ -168,7 +201,8 @@ if ! health_ok; then
     exit 1
   fi
 
-  nohup "$STASH_BACKEND_VENV/bin/python" -m uvicorn stash_backend.main:app --host 127.0.0.1 --port 8765 \
+  nohup env STASH_CODEX_MODE="$STASH_CODEX_MODE" STASH_CODEX_BIN="${STASH_CODEX_BIN:-codex}" PATH="$PATH" \
+    "$STASH_BACKEND_VENV/bin/python" -m uvicorn stash_backend.main:app --host 127.0.0.1 --port 8765 \
     >"$LOG_DIR/backend.log" 2>&1 &
 
   BACKEND_PID=$!
@@ -195,6 +229,7 @@ fi
 
 export STASH_BACKEND_URL
 export STASH_CODEX_MODE
+export STASH_CODEX_BIN
 "$FRONTEND_BIN" >>"$LOG_DIR/frontend.log" 2>&1 || true
 
 if [ "$backend_started_by_launcher" -eq 1 ] && [ -f "$BACKEND_PID_FILE" ]; then

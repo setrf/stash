@@ -57,7 +57,9 @@ final class AppViewModel: ObservableObject {
     private let maxMentionExcerptChars = 3500
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
+    private let lastProjectBookmarkKey = "stash.lastProjectFolderBookmark"
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
+    private var activeSecurityScopedProjectURL: URL?
     private var client: BackendClient
 
     init() {
@@ -68,6 +70,9 @@ final class AppViewModel: ObservableObject {
         runPollTask?.cancel()
         filePollTask?.cancel()
         indexStatusClearTask?.cancel()
+        if let activeSecurityScopedProjectURL {
+            activeSecurityScopedProjectURL.stopAccessingSecurityScopedResource()
+        }
     }
 
     var selectedConversation: Conversation? {
@@ -132,11 +137,18 @@ final class AppViewModel: ObservableObject {
             }
         }
 
+        if let bookmarkData = defaults.data(forKey: lastProjectBookmarkKey),
+           let restored = resolveBookmarkedProjectURL(from: bookmarkData),
+           FileManager.default.fileExists(atPath: restored.url.path)
+        {
+            await openProject(url: restored.url, bookmarkData: restored.bookmarkData)
+            return
+        }
+
         if let lastPath = defaults.string(forKey: lastProjectPathKey),
            FileManager.default.fileExists(atPath: lastPath)
         {
-            await openProject(url: URL(fileURLWithPath: lastPath))
-            return
+            errorText = "Re-select your project folder once so macOS can grant persistent access."
         }
     }
 
@@ -248,24 +260,37 @@ final class AppViewModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a project folder for Stash"
+        panel.canCreateDirectories = false
+        panel.prompt = "Grant Access"
+        panel.message = "Choose a project folder for Stash. This grants macOS folder access and saves it for future launches."
+        panel.directoryURL = projectRootURL
 
         if panel.runModal() == .OK, let url = panel.url {
-            Task { await openProject(url: url) }
+            let bookmarkData = createProjectBookmark(for: url)
+            Task { await openProject(url: url, bookmarkData: bookmarkData) }
         } else if project == nil {
             errorText = "No project selected. Pick a folder to start using Stash."
         }
     }
 
-    func openProject(url: URL) async {
+    func openProject(url: URL, bookmarkData: Data? = nil) async {
+        guard let prepared = prepareProjectAccess(url: url, bookmarkData: bookmarkData) else {
+            errorText = "Could not access this folder. Re-select it and grant macOS access."
+            return
+        }
+
         do {
-            let opened = try await client.createOrOpenProject(name: url.lastPathComponent, rootPath: url.path)
+            let opened = try await client.createOrOpenProject(
+                name: prepared.url.lastPathComponent,
+                rootPath: prepared.url.path
+            )
             project = opened
-            projectRootURL = url
+            projectRootURL = prepared.url
             runThinkingText = nil
             runPlanningText = nil
             runTodos = []
-            defaults.set(url.path, forKey: lastProjectPathKey)
+            rememberProjectSelection(url: prepared.url, bookmarkData: prepared.bookmarkData)
+            activatePreparedAccess(prepared)
 
             await refreshFiles(force: true, triggerChangeIndex: false)
             refreshMentionState()
@@ -281,7 +306,108 @@ final class AppViewModel: ObservableObject {
             }
             errorText = nil
         } catch {
+            releasePreparedAccessOnFailure(prepared)
             errorText = "Could not open project: \(error.localizedDescription)"
+        }
+    }
+
+    private struct PreparedProjectAccess {
+        let url: URL
+        let bookmarkData: Data?
+        let startedSecurityScope: Bool
+        let previousSecurityScopedURL: URL?
+    }
+
+    private func createProjectBookmark(for url: URL) -> Data? {
+        do {
+            return try url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+        } catch {
+            errorText = "Could not save folder permission bookmark: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func resolveBookmarkedProjectURL(from bookmarkData: Data) -> (url: URL, bookmarkData: Data?)? {
+        do {
+            var stale = false
+            let resolvedURL = try URL(
+                resolvingBookmarkData: bookmarkData,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            ).standardizedFileURL
+
+            if stale {
+                let refreshed = createProjectBookmark(for: resolvedURL)
+                return (resolvedURL, refreshed)
+            }
+            return (resolvedURL, bookmarkData)
+        } catch {
+            defaults.removeObject(forKey: lastProjectBookmarkKey)
+            return nil
+        }
+    }
+
+    private func prepareProjectAccess(url: URL, bookmarkData: Data?) -> PreparedProjectAccess? {
+        let standardizedURL = url.standardizedFileURL
+        var resolvedURL = standardizedURL
+        var effectiveBookmark = bookmarkData
+
+        if let bookmarkData, let restored = resolveBookmarkedProjectURL(from: bookmarkData) {
+            resolvedURL = restored.url
+            effectiveBookmark = restored.bookmarkData
+        } else if bookmarkData == nil {
+            effectiveBookmark = createProjectBookmark(for: standardizedURL)
+        }
+
+        guard FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            return nil
+        }
+
+        let previous = activeSecurityScopedProjectURL
+        let startedSecurityScope: Bool
+        if previous?.standardizedFileURL == resolvedURL.standardizedFileURL {
+            startedSecurityScope = false
+        } else {
+            startedSecurityScope = resolvedURL.startAccessingSecurityScopedResource()
+        }
+
+        return PreparedProjectAccess(
+            url: resolvedURL,
+            bookmarkData: effectiveBookmark,
+            startedSecurityScope: startedSecurityScope,
+            previousSecurityScopedURL: previous
+        )
+    }
+
+    private func activatePreparedAccess(_ prepared: PreparedProjectAccess) {
+        if let previous = prepared.previousSecurityScopedURL, previous != prepared.url {
+            previous.stopAccessingSecurityScopedResource()
+        }
+
+        if prepared.startedSecurityScope {
+            activeSecurityScopedProjectURL = prepared.url
+        } else if prepared.previousSecurityScopedURL?.standardizedFileURL != prepared.url.standardizedFileURL {
+            activeSecurityScopedProjectURL = nil
+        }
+    }
+
+    private func releasePreparedAccessOnFailure(_ prepared: PreparedProjectAccess) {
+        if prepared.startedSecurityScope {
+            prepared.url.stopAccessingSecurityScopedResource()
+        }
+    }
+
+    private func rememberProjectSelection(url: URL, bookmarkData: Data?) {
+        defaults.set(url.path, forKey: lastProjectPathKey)
+        if let bookmarkData {
+            defaults.set(bookmarkData, forKey: lastProjectBookmarkKey)
+        } else {
+            defaults.removeObject(forKey: lastProjectBookmarkKey)
         }
     }
 

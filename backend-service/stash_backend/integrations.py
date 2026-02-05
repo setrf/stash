@@ -8,6 +8,14 @@ from typing import Any
 
 from .runtime_config import RuntimeConfig
 
+FALLBACK_BIN_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "~/.local/bin",
+)
+
 
 def resolve_binary(binary: str) -> str | None:
     candidate = Path(binary).expanduser()
@@ -15,7 +23,17 @@ def resolve_binary(binary: str) -> str | None:
         if candidate.exists() and os.access(candidate, os.X_OK):
             return str(candidate.resolve())
         return None
-    return shutil.which(binary)
+
+    found = shutil.which(binary)
+    if found:
+        return found
+
+    for raw_dir in FALLBACK_BIN_DIRS:
+        base = Path(raw_dir).expanduser()
+        path = (base / binary).expanduser()
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path.resolve())
+    return None
 
 
 def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
