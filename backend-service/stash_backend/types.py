@@ -64,6 +64,28 @@ class ExecutionResult:
 
 
 @dataclass(slots=True)
+class DirectCommandResult:
+    command: str
+    exit_code: int
+    output: str
+    status: str
+    cwd: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+@dataclass(slots=True)
+class DirectExecutionResult:
+    engine: str
+    assistant_text: str
+    commands: list[DirectCommandResult]
+    started_at: str
+    finished_at: str
+    cwd: str
+    worktree_path: str
+
+
+@dataclass(slots=True)
 class IndexJob:
     job_id: str
     project_id: str

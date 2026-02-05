@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 PLANNER_BACKENDS = {"auto", "codex_cli", "openai_api"}
 CODEX_MODES = {"cli", "shell"}
 PLANNER_MODES = {"fast", "balanced", "quality"}
+EXECUTION_MODES = {"planner", "execute"}
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class RuntimeConfig:
     planner_cmd: str | None = None
     planner_timeout_seconds: int = 60
     planner_mode: str = "fast"
+    execution_mode: str = "execute"
     execution_parallel_reads_enabled: bool = True
     execution_parallel_reads_max_workers: int = 3
     openai_api_key: str | None = None
@@ -43,6 +45,7 @@ class RuntimeConfig:
             planner_cmd=settings.planner_cmd,
             planner_timeout_seconds=settings.planner_timeout_seconds,
             planner_mode=settings.planner_mode if settings.planner_mode in PLANNER_MODES else "fast",
+            execution_mode=settings.execution_mode if settings.execution_mode in EXECUTION_MODES else "execute",
             execution_parallel_reads_enabled=bool(settings.execution_parallel_reads_enabled),
             execution_parallel_reads_max_workers=max(1, min(settings.execution_parallel_reads_max_workers, 8)),
             openai_api_key=settings.openai_api_key,
@@ -81,6 +84,7 @@ class RuntimeConfigStore:
             "planner_cmd": cfg.planner_cmd,
             "planner_timeout_seconds": cfg.planner_timeout_seconds,
             "planner_mode": cfg.planner_mode,
+            "execution_mode": cfg.execution_mode,
             "execution_parallel_reads_enabled": cfg.execution_parallel_reads_enabled,
             "execution_parallel_reads_max_workers": cfg.execution_parallel_reads_max_workers,
             "openai_api_key_set": bool(cfg.openai_api_key),
@@ -101,6 +105,7 @@ class RuntimeConfigStore:
         clear_planner_cmd: bool = False,
         planner_timeout_seconds: int | None = None,
         planner_mode: str | None = None,
+        execution_mode: str | None = None,
         execution_parallel_reads_enabled: bool | None = None,
         execution_parallel_reads_max_workers: int | None = None,
         openai_api_key: str | None = None,
@@ -150,6 +155,12 @@ class RuntimeConfigStore:
                 if cleaned_mode not in PLANNER_MODES:
                     raise ValueError("planner_mode must be one of: fast, balanced, quality")
                 next_cfg.planner_mode = cleaned_mode
+
+            if execution_mode is not None:
+                cleaned_mode = execution_mode.strip().lower()
+                if cleaned_mode not in EXECUTION_MODES:
+                    raise ValueError("execution_mode must be one of: planner, execute")
+                next_cfg.execution_mode = cleaned_mode
 
             if execution_parallel_reads_enabled is not None:
                 next_cfg.execution_parallel_reads_enabled = bool(execution_parallel_reads_enabled)
@@ -207,6 +218,7 @@ class RuntimeConfigStore:
                 planner_cmd=parsed.get("planner_cmd"),
                 planner_timeout_seconds=parsed.get("planner_timeout_seconds"),
                 planner_mode=parsed.get("planner_mode"),
+                execution_mode=parsed.get("execution_mode"),
                 execution_parallel_reads_enabled=parsed.get("execution_parallel_reads_enabled"),
                 execution_parallel_reads_max_workers=parsed.get("execution_parallel_reads_max_workers"),
                 openai_api_key=parsed.get("openai_api_key"),

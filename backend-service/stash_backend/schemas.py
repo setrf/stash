@@ -181,6 +181,7 @@ class RuntimeConfigResponse(BaseModel):
     planner_cmd: str | None = None
     planner_timeout_seconds: int
     planner_mode: Literal["fast", "balanced", "quality"]
+    execution_mode: Literal["planner", "execute"]
     execution_parallel_reads_enabled: bool
     execution_parallel_reads_max_workers: int
     openai_api_key_set: bool
@@ -199,6 +200,7 @@ class RuntimeConfigUpdateRequest(BaseModel):
     clear_planner_cmd: bool = False
     planner_timeout_seconds: int | None = Field(default=None, ge=20, le=600)
     planner_mode: Literal["fast", "balanced", "quality"] | None = None
+    execution_mode: Literal["planner", "execute"] | None = None
     execution_parallel_reads_enabled: bool | None = None
     execution_parallel_reads_max_workers: int | None = Field(default=None, ge=1, le=8)
     openai_api_key: str | None = None

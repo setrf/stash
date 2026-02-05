@@ -52,6 +52,7 @@ READ_HINT_KEYWORDS = (
     "open",
     "show",
     "view",
+    "summary",
     "summarize",
     "analyse",
     "analyze",
@@ -926,11 +927,11 @@ class Planner:
             return None
 
         for match in FILE_REF_RE.findall(user_message):
-            cleaned = match.strip().strip("`\"'")
+            cleaned = match.strip().strip("`\"'").lstrip("@")
             if not cleaned or cleaned.startswith("http://") or cleaned.startswith("https://"):
                 continue
-            quoted_path = shlex.quote(cleaned)
             project_root = str(project_summary.get("root_path") or ".")
+            quoted_path = shlex.quote(cleaned)
             planner_text = (
                 "Planner fallback recovery: reading the requested file directly.\n"
                 "<codex_cmd>\n"
