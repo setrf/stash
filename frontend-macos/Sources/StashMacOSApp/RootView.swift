@@ -36,6 +36,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $viewModel.setupSheetPresented) {
             RuntimeSetupSheet(viewModel: viewModel)
+                .interactiveDismissDisabled(viewModel.onboardingActive && !viewModel.onboardingReadyToFinish)
         }
     }
 }
@@ -410,6 +411,14 @@ private struct SetupRequiredCard: View {
                 }
             }
 
+            if let recommendations = viewModel.setupStatus?.recommendations, !recommendations.isEmpty {
+                ForEach(recommendations, id: \.self) { recommendation in
+                    Text("• \(recommendation)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                }
+            }
+
             Button("Open AI Setup") {
                 viewModel.openSetupSheet()
             }
@@ -434,13 +443,35 @@ private struct RuntimeSetupSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("AI Runtime Setup")
+            Text(viewModel.onboardingActive ? "Welcome To Stash" : "AI Runtime Setup")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
                 .foregroundStyle(CodexTheme.textPrimary)
 
-            Text("Configure GPT + Codex once. Settings are stored locally by the backend, not in `.env`.")
+            Text(viewModel.onboardingActive
+                ? "Complete first-run setup: backend check, AI runtime config, and project selection."
+                : "Configure GPT + Codex once. Settings are stored locally by the backend, not in `.env`.")
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(CodexTheme.textSecondary)
+
+            if viewModel.onboardingActive {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Required Checklist")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                    OnboardingRow(title: "Backend connected", done: viewModel.backendConnected)
+                    OnboardingRow(title: "AI runtime ready", done: viewModel.aiSetupReady)
+                    OnboardingRow(title: "Project folder selected", done: viewModel.project != nil)
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+                )
+            }
 
             Form {
                 Picker("Planner backend", selection: $viewModel.setupPlannerBackend) {
@@ -479,6 +510,32 @@ private struct RuntimeSetupSheet: View {
                 }
             }
 
+            if let required = viewModel.setupStatus?.requiredBlockers, !required.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Required fixes:")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(CodexTheme.warning)
+                    ForEach(required, id: \.self) { item in
+                        Text("• \(item)")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(CodexTheme.warning)
+                    }
+                }
+            }
+
+            if let tips = viewModel.setupStatus?.recommendations, !tips.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Recommended:")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                    ForEach(tips, id: \.self) { item in
+                        Text("• \(item)")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                    }
+                }
+            }
+
             if let setupStatusText = viewModel.setupStatusText {
                 Text(setupStatusText)
                     .font(.system(size: 11, weight: .medium, design: .rounded))
@@ -486,6 +543,13 @@ private struct RuntimeSetupSheet: View {
             }
 
             HStack {
+                if viewModel.onboardingActive {
+                    Button("Choose Project Folder") {
+                        viewModel.presentProjectPicker()
+                    }
+                    .buttonStyle(.bordered)
+                }
+
                 Button("Refresh Checks") {
                     Task { await viewModel.refreshRuntimeSetup() }
                 }
@@ -493,22 +557,50 @@ private struct RuntimeSetupSheet: View {
 
                 Spacer()
 
-                Button("Save") {
+                Button(viewModel.onboardingActive ? "Save Settings" : "Save") {
                     Task {
                         await viewModel.saveRuntimeSetup()
-                        if viewModel.aiSetupReady {
+                        if !viewModel.onboardingActive, viewModel.aiSetupReady {
                             dismiss()
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(viewModel.setupSaving)
+
+                if viewModel.onboardingActive {
+                    Button("Finish Onboarding") {
+                        viewModel.finishOnboarding()
+                        if !viewModel.onboardingActive {
+                            dismiss()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!viewModel.onboardingReadyToFinish)
+                }
             }
         }
         .padding(16)
         .frame(minWidth: 620, minHeight: 560)
         .task {
             await viewModel.refreshRuntimeSetup()
+        }
+    }
+}
+
+private struct OnboardingRow: View {
+    let title: String
+    let done: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(done ? CodexTheme.success : CodexTheme.textSecondary)
+                .font(.system(size: 12, weight: .semibold))
+            Text(title)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
+            Spacer()
         }
     }
 }

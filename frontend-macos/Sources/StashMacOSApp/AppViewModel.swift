@@ -40,6 +40,7 @@ final class AppViewModel: ObservableObject {
     @Published var setupOpenAIBaseURL = "https://api.openai.com/v1"
     @Published var setupOpenAITimeoutSeconds = "60"
     @Published var setupStatusText: String?
+    @Published var onboardingActive = false
 
     @Published var errorText: String?
 
@@ -56,6 +57,7 @@ final class AppViewModel: ObservableObject {
     private let maxMentionExcerptChars = 3500
     private let defaults = UserDefaults.standard
     private let lastProjectPathKey = "stash.lastProjectPath"
+    private let onboardingCompletedKey = "stash.onboardingCompletedV1"
     private var client: BackendClient
 
     init() {
@@ -74,6 +76,10 @@ final class AppViewModel: ObservableObject {
 
     var aiSetupReady: Bool {
         setupStatus?.plannerReady == true
+    }
+
+    var onboardingReadyToFinish: Bool {
+        backendConnected && aiSetupReady && project != nil
     }
 
     var aiSetupBadgeText: String {
@@ -115,8 +121,14 @@ final class AppViewModel: ObservableObject {
         await pingBackend()
         if backendConnected {
             await refreshRuntimeSetup()
-            if !aiSetupReady {
-                setupSheetPresented = true
+        }
+
+        let onboardingCompleted = defaults.bool(forKey: onboardingCompletedKey)
+        if !onboardingCompleted {
+            onboardingActive = true
+            setupSheetPresented = true
+            if setupStatusText == nil {
+                setupStatusText = "Welcome to Stash. Complete the first-run setup checklist."
             }
         }
 
@@ -146,6 +158,17 @@ final class AppViewModel: ObservableObject {
         Task { await refreshRuntimeSetup() }
     }
 
+    func finishOnboarding() {
+        if !onboardingReadyToFinish {
+            setupStatusText = "Complete all required onboarding steps before finishing."
+            return
+        }
+        defaults.set(true, forKey: onboardingCompletedKey)
+        onboardingActive = false
+        setupSheetPresented = false
+        setupStatusText = "Setup complete."
+    }
+
     func refreshRuntimeSetup() async {
         guard backendConnected else { return }
         do {
@@ -162,7 +185,13 @@ final class AppViewModel: ObservableObject {
             setupOpenAIModel = config.openaiModel
             setupOpenAIBaseURL = config.openaiBaseUrl
             setupOpenAITimeoutSeconds = String(config.openaiTimeoutSeconds)
-            setupStatusText = status.plannerReady ? "AI setup is ready." : "Complete setup to run AI tasks."
+            if onboardingActive {
+                setupStatusText = status.plannerReady
+                    ? "AI setup is ready. Select a project folder, then finish onboarding."
+                    : "Complete setup to continue onboarding."
+            } else {
+                setupStatusText = status.plannerReady ? "AI setup is ready." : "Complete setup to run AI tasks."
+            }
         } catch {
             setupStatusText = "Could not load setup status: \(error.localizedDescription)"
         }
@@ -198,9 +227,12 @@ final class AppViewModel: ObservableObject {
             )
             setupOpenAIAPIKey = ""
             await refreshRuntimeSetup()
-            if aiSetupReady {
+            if !onboardingActive && aiSetupReady {
                 setupSheetPresented = false
                 errorText = nil
+            }
+            if onboardingActive, aiSetupReady {
+                setupStatusText = "AI setup is ready. Select a project folder, then finish onboarding."
             }
         } catch {
             setupStatusText = "Could not save setup: \(error.localizedDescription)"
@@ -243,6 +275,9 @@ final class AppViewModel: ObservableObject {
             await pingBackend()
             if backendConnected {
                 await refreshRuntimeSetup()
+                if onboardingActive, onboardingReadyToFinish {
+                    setupStatusText = "All required steps are complete. Finish onboarding."
+                }
             }
             errorText = nil
         } catch {

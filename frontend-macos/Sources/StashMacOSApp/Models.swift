@@ -166,6 +166,8 @@ struct RuntimeSetupStatus: Decodable {
     let openaiPlannerReady: Bool
     let gptViaCodexCliPossible: Bool
     let plannerReady: Bool
+    let requiredBlockers: [String]
+    let recommendations: [String]
     let blockers: [String]
 }
 

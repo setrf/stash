@@ -68,23 +68,28 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
     status["openai_planner_ready"] = openai_ready
     status["gpt_via_codex_cli_possible"] = codex_ready
 
-    blockers: list[str] = []
+    required_blockers: list[str] = []
+    recommendations: list[str] = []
     if runtime.planner_backend == "openai_api":
         if not openai_ready:
-            blockers.append("OpenAI API key is missing for OpenAI planner mode.")
+            required_blockers.append("OpenAI API key is missing for OpenAI planner mode.")
+        if not codex_ready:
+            recommendations.append("Configure Codex CLI login to enable GPT-through-Codex flow.")
     elif runtime.planner_backend == "codex_cli":
         if not codex_ready:
-            blockers.append("Codex CLI is not ready. Verify binary path and login status.")
+            required_blockers.append("Codex CLI is not ready. Verify binary path and login status.")
         if not openai_ready:
-            blockers.append("Optional fallback unavailable: OpenAI API key is not configured.")
+            recommendations.append("Configure OpenAI API key for planner fallback.")
     else:
         if not codex_ready and not openai_ready:
-            blockers.append("Neither Codex CLI nor OpenAI API planner is ready.")
-        if not codex_ready:
-            blockers.append("Codex CLI not ready for GPT-through-Codex path.")
+            required_blockers.append("Neither Codex CLI nor OpenAI API planner is ready.")
+        elif not codex_ready:
+            recommendations.append("Codex CLI is not ready; currently relying on OpenAI API planner only.")
         if not openai_ready:
-            blockers.append("OpenAI API key fallback is not configured.")
+            recommendations.append("Configure OpenAI API key for planner fallback.")
 
-    status["planner_ready"] = bool(codex_ready or openai_ready)
-    status["blockers"] = blockers
+    status["planner_ready"] = not required_blockers
+    status["required_blockers"] = required_blockers
+    status["recommendations"] = recommendations
+    status["blockers"] = required_blockers
     return status
