@@ -8,16 +8,18 @@ import shlex
 import subprocess
 import sysconfig
 from pathlib import Path
+from typing import Any
 
 from .config import Settings
 from .integrations import is_codex_model_config_error, resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
-from .types import ExecutionResult, ProjectContext, TaggedCommand
+from .types import DirectCommandResult, DirectExecutionResult, ExecutionResult, ProjectContext, TaggedCommand
 from .utils import ensure_inside, stable_slug, utc_now_iso
 
 TAG_RE = re.compile(r"<codex_cmd>(.*?)</codex_cmd>", flags=re.DOTALL | re.IGNORECASE)
 logger = logging.getLogger(__name__)
 CODEX_EXEC_REASONING_EFFORT = "low"
+CODEX_DIRECT_REASONING_EFFORT = "medium"
 
 ALLOWED_PREFIXES = {
     "ls",
@@ -260,6 +262,224 @@ class CodexExecutor:
             return proc.returncode, "", stderr
 
         return self._parse_codex_json_events(proc.stdout or "")
+
+    def _build_codex_task_prompt(
+        self,
+        *,
+        user_message: str,
+        conversation_history: list[dict[str, Any]],
+        skill_bundle: str,
+        project_summary: dict[str, Any],
+    ) -> str:
+        trimmed_history = []
+        for item in conversation_history[-8:]:
+            trimmed_history.append(
+                {
+                    "role": item.get("role"),
+                    "content": str(item.get("content", ""))[:400],
+                    "created_at": item.get("created_at"),
+                }
+            )
+        return (
+            "You are the Stash Codex execution agent.\n"
+            "Execute the user's request directly by running shell commands inside the current project.\n"
+            "You may run multiple commands when needed.\n"
+            "Keep commands safe and non-destructive.\n"
+            "Stay inside the project directory.\n"
+            "Never use sudo or destructive git/rm resets.\n"
+            "If you create output files for the user, include each path in final response as <stash_file>relative/path.ext</stash_file>.\n"
+            "After command execution, provide one concise final user-facing response.\n\n"
+            f"Project summary JSON:\n{json.dumps(project_summary, ensure_ascii=True)}\n\n"
+            f"Recent conversation JSON:\n{json.dumps(trimmed_history, ensure_ascii=True)}\n\n"
+            f"Skills context:\n{skill_bundle[:3000]}\n\n"
+            f"User request:\n{user_message}\n"
+        )
+
+    def _parse_codex_multi_step_events(self, output: str) -> tuple[list[DirectCommandResult], str]:
+        commands: list[DirectCommandResult] = []
+        final_message = ""
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "item.completed":
+                continue
+            item = event.get("item") or {}
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    final_message = text.strip()
+                continue
+            if item_type != "command_execution":
+                continue
+            command_text = str(item.get("command") or item.get("cmd") or "(unknown command)")
+            exit_code = int(item.get("exit_code") or 0)
+            status = str(item.get("status") or ("completed" if exit_code == 0 else "failed"))
+            output_text = str(item.get("aggregated_output") or item.get("output") or "")
+            cwd = str(item.get("cwd")) if item.get("cwd") else None
+            started_at = str(item.get("started_at")) if item.get("started_at") else None
+            finished_at = str(item.get("finished_at")) if item.get("finished_at") else None
+            commands.append(
+                DirectCommandResult(
+                    command=command_text,
+                    exit_code=exit_code,
+                    output=output_text,
+                    status=status,
+                    cwd=cwd,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
+            )
+        return commands, final_message
+
+    def _run_task_via_codex_cli(
+        self,
+        *,
+        cwd: Path,
+        prompt: str,
+        codex_bin: str,
+        codex_model: str | None,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> tuple[list[DirectCommandResult], str]:
+        base_cmdline = [
+            codex_bin,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            "-C",
+            str(cwd),
+            "-c",
+            f'reasoning.effort="{CODEX_DIRECT_REASONING_EFFORT}"',
+        ]
+        cmdline = list(base_cmdline)
+        if codex_model:
+            cmdline.extend(["-m", codex_model])
+        cmdline.append("-")
+
+        try:
+            proc = subprocess.run(
+                cmdline,
+                input=prompt,
+                cwd=str(cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CodexCommandError(f"Codex execution timed out after {timeout_seconds} seconds") from exc
+
+        if proc.returncode != 0:
+            stderr = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip() or "Codex CLI failed"
+            if codex_model and is_codex_model_config_error(stderr):
+                logger.warning(
+                    "Codex execution model '%s' is incompatible; retrying task without explicit model",
+                    codex_model,
+                )
+                if self.runtime_config_store is not None:
+                    try:
+                        self.runtime_config_store.update(codex_planner_model="")
+                    except Exception:
+                        logger.exception("Could not persist codex execution model reset")
+                return self._run_task_via_codex_cli(
+                    cwd=cwd,
+                    prompt=prompt,
+                    codex_bin=codex_bin,
+                    codex_model=None,
+                    env=env,
+                    timeout_seconds=timeout_seconds,
+                )
+
+            commands, assistant = self._parse_codex_multi_step_events(proc.stdout or "")
+            if commands or assistant:
+                return commands, assistant
+            raise CodexCommandError(stderr)
+
+        commands, assistant = self._parse_codex_multi_step_events(proc.stdout or "")
+        if not commands and not assistant:
+            raise CodexCommandError("Codex CLI did not emit executable output")
+        return commands, assistant
+
+    def execute_task(
+        self,
+        context: ProjectContext,
+        *,
+        user_message: str,
+        conversation_history: list[dict[str, Any]],
+        skill_bundle: str,
+        project_summary: dict[str, Any],
+    ) -> DirectExecutionResult:
+        runtime = self._runtime_config()
+        if runtime.codex_mode != "cli":
+            raise CodexCommandError("Direct execute mode requires codex_mode='cli'")
+
+        cwd = context.root_path.resolve()
+        worktree_path = self._resolve_worktree(context, "main")
+        if not cwd.exists() or not cwd.is_dir():
+            raise CodexCommandError("Execution cwd does not exist")
+        if not context.permission or context.permission.needs_sudo:
+            raise CodexCommandError(
+                "Project is not writable by current process. "
+                "Grant folder permissions or launch with elevated privileges."
+            )
+
+        resolved_codex = resolve_binary(runtime.codex_bin)
+        if not resolved_codex:
+            raise CodexCommandError(f"Codex binary not found: {runtime.codex_bin}")
+
+        runtime_cache_dir = context.stash_dir / "runtime-cache"
+        uv_cache_dir = runtime_cache_dir / "uv"
+        runtime_cache_dir.mkdir(parents=True, exist_ok=True)
+        uv_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        exec_env = dict(os.environ)
+        exec_env["UV_CACHE_DIR"] = str(uv_cache_dir)
+        exec_env.setdefault("XDG_CACHE_HOME", str(runtime_cache_dir))
+        venv_scripts = sysconfig.get_path("scripts")
+        if venv_scripts:
+            existing_path = exec_env.get("PATH", "")
+            exec_env["PATH"] = f"{venv_scripts}{os.pathsep}{existing_path}" if existing_path else venv_scripts
+        venv_purelib = sysconfig.get_paths().get("purelib")
+        if venv_purelib:
+            existing_pythonpath = exec_env.get("PYTHONPATH", "")
+            exec_env["PYTHONPATH"] = f"{venv_purelib}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(venv_purelib)
+
+        prompt = self._build_codex_task_prompt(
+            user_message=user_message,
+            conversation_history=conversation_history,
+            skill_bundle=skill_bundle,
+            project_summary=project_summary,
+        )
+        started_at = utc_now_iso()
+        commands, assistant = self._run_task_via_codex_cli(
+            cwd=cwd,
+            prompt=prompt,
+            codex_bin=resolved_codex,
+            codex_model=runtime.codex_planner_model,
+            env=exec_env,
+            timeout_seconds=max(20, runtime.planner_timeout_seconds),
+        )
+        finished_at = utc_now_iso()
+        return DirectExecutionResult(
+            engine="codex-cli",
+            assistant_text=assistant,
+            commands=commands,
+            started_at=started_at,
+            finished_at=finished_at,
+            cwd=str(cwd),
+            worktree_path=str(worktree_path),
+        )
 
     def execute(self, context: ProjectContext, command: TaggedCommand) -> ExecutionResult:
         self._validate_command(command.cmd)

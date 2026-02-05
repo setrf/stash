@@ -11,7 +11,7 @@ from stash_backend.db import ProjectRepository
 from stash_backend.orchestrator import RunOrchestrator
 from stash_backend.project_store import ProjectStore
 from stash_backend.runtime_config import RuntimeConfig
-from stash_backend.types import ExecutionResult, PlanResult
+from stash_backend.types import DirectCommandResult, DirectExecutionResult, ExecutionResult, PlanResult
 
 
 def _plan_with_commands(planner_text: str, **kwargs: Any) -> PlanResult:
@@ -94,6 +94,41 @@ class _FakeCodex:
             worktree_path=str(context.stash_dir / "worktrees" / "main"),
         )
 
+    def execute_task(
+        self,
+        context: Any,
+        *,
+        user_message: str,
+        conversation_history: list[dict[str, Any]],
+        skill_bundle: str,
+        project_summary: dict[str, Any],
+    ) -> DirectExecutionResult:
+        _ = (context, user_message, conversation_history, skill_bundle, project_summary)
+        return DirectExecutionResult(
+            engine="codex-cli",
+            assistant_text="Direct execution complete.",
+            commands=[
+                DirectCommandResult(
+                    command="cat notes.txt",
+                    exit_code=0,
+                    output="summary line 1\nsummary line 2\n",
+                    status="completed",
+                    cwd=str(context.root_path),
+                ),
+                DirectCommandResult(
+                    command="python3 -c 'open(\"summary.txt\",\"w\").write(\"done\")'",
+                    exit_code=0,
+                    output="created: summary.txt",
+                    status="completed",
+                    cwd=str(context.root_path),
+                ),
+            ],
+            started_at="2026-01-01T00:00:00Z",
+            finished_at="2026-01-01T00:00:02Z",
+            cwd=str(context.root_path),
+            worktree_path=str(context.stash_dir / "worktrees" / "main"),
+        )
+
 
 class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -150,6 +185,7 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         codex = _FakeCodex()
         runtime_store = _FakeRuntimeConfigStore(
             RuntimeConfig(
+                execution_mode="planner",
                 planner_mode="fast",
                 planner_timeout_seconds=60,
                 execution_parallel_reads_enabled=True,
@@ -202,6 +238,7 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         )
         runtime_store = _FakeRuntimeConfigStore(
             RuntimeConfig(
+                execution_mode="planner",
                 planner_mode="fast",
                 planner_timeout_seconds=60,
                 execution_parallel_reads_enabled=True,
@@ -236,6 +273,39 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(modes_by_step.get(2), "parallel_read")
         self.assertEqual(modes_by_step.get(3), "parallel_read")
         self.assertEqual(modes_by_step.get(4), "sequential")
+
+    async def test_execute_mode_skips_planner_and_supports_multi_step(self) -> None:
+        planner = _FakePlanner([])
+        codex = _FakeCodex()
+        runtime_store = _FakeRuntimeConfigStore(
+            RuntimeConfig(
+                execution_mode="execute",
+                planner_mode="fast",
+                planner_timeout_seconds=60,
+            )
+        )
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=runtime_store,  # type: ignore[arg-type]
+        )
+
+        run_id = await self._run_orchestrator(orchestrator)
+        run = self.repo.get_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run["status"], "done")
+        self.assertEqual(len(planner.plan_calls), 0)
+
+        events = self.repo.list_events(after_id=0, conversation_id=self.conversation["id"], limit=400)
+        started = [event for event in events if event["type"] == "run_started"]
+        self.assertTrue(started)
+        self.assertEqual(str(started[-1]["payload"].get("execution_mode")), "execute")
+
+        completed_steps = [event for event in events if event["type"] == "run_step_completed"]
+        self.assertEqual(len(completed_steps), 2)
+        self.assertEqual(str(completed_steps[0]["payload"].get("execution_mode")), "direct_codex")
 
 
 if __name__ == "__main__":

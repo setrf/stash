@@ -317,6 +317,255 @@ class RunOrchestrator:
 
         return run
 
+    async def _execute_direct_mode(
+        self,
+        *,
+        context: Any,
+        repo: ProjectRepository,
+        conversation_id: str,
+        run_id: str,
+        trigger_message_id: str,
+        trigger_msg: dict[str, Any],
+        planner_user_message: str,
+        history: list[dict[str, Any]],
+        skills: str,
+        run_started: float,
+        scan_ms: int,
+        search_ms: int,
+    ) -> None:
+        planning_ms = 0
+        synthesis_ms = 0
+        command_exec_ms = 0
+        tool_summaries: list[str] = []
+        tool_results_for_response: list[dict[str, Any]] = []
+        output_files_for_response: list[str] = []
+        output_file_seen: set[str] = set()
+        failures = 0
+
+        direct_started = time.perf_counter()
+        direct_result = await asyncio.to_thread(
+            self.codex.execute_task,
+            context,
+            user_message=planner_user_message,
+            conversation_history=history,
+            skill_bundle=skills,
+            project_summary=repo.project_view(),
+        )
+        command_exec_ms = int((time.perf_counter() - direct_started) * 1000)
+
+        with context.lock:
+            repo.add_event(
+                "run_planned",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload={
+                    "command_count": len(direct_result.commands),
+                    "rag_hit_count": 0,
+                    "rag_paths": [],
+                    "planner_preview": "",
+                    "commands": [item.command for item in direct_result.commands[:12]],
+                    "used_backend": "direct_codex",
+                    "used_fallback": None,
+                    "timed_out_primary": False,
+                    "execution_mode": "execute",
+                },
+            )
+
+        for step_index, item in enumerate(direct_result.commands, start=1):
+            command_cwd = item.cwd or str(context.root_path.resolve())
+            try:
+                resolved_cwd = Path(command_cwd).resolve()
+                if not ensure_inside(context.root_path.resolve(), resolved_cwd):
+                    resolved_cwd = context.root_path.resolve()
+            except OSError:
+                resolved_cwd = context.root_path.resolve()
+            stdout = item.output if int(item.exit_code) == 0 else ""
+            stderr = item.output if int(item.exit_code) != 0 else ""
+            status = "completed" if int(item.exit_code) == 0 else "failed"
+            if status != "completed":
+                failures += 1
+
+            output_files = self._detect_output_files(
+                context=context,
+                cwd=resolved_cwd,
+                command_text=item.command,
+                stdout=stdout,
+                stderr=stderr,
+                baseline={},
+            )
+
+            with context.lock:
+                step_id = repo.create_run_step(
+                    run_id,
+                    step_index,
+                    "codex_cmd",
+                    {
+                        "raw": item.command,
+                        "cmd": item.command,
+                        "cwd": str(resolved_cwd),
+                        "worktree": "main",
+                    },
+                )
+                repo.add_event(
+                    "run_step_started",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    payload={
+                        "step_id": step_id,
+                        "step_index": step_index,
+                        "execution_mode": "direct_codex",
+                    },
+                )
+                step_output: dict[str, Any] = {
+                    "engine": direct_result.engine,
+                    "exit_code": int(item.exit_code),
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "cwd": str(resolved_cwd),
+                    "worktree_path": str(direct_result.worktree_path),
+                    "started_at": item.started_at or direct_result.started_at,
+                    "finished_at": item.finished_at or direct_result.finished_at,
+                    "execution_mode": "direct_codex",
+                }
+                if output_files:
+                    step_output["output_files"] = output_files
+                repo.finish_run_step(step_id, status=status, output_data=step_output)
+                event_payload: dict[str, Any] = {
+                    "step_id": step_id,
+                    "step_index": step_index,
+                    "status": status,
+                    "exit_code": int(item.exit_code),
+                    "duration_ms": 0,
+                    "execution_mode": "direct_codex",
+                }
+                if output_files:
+                    event_payload["output_files"] = output_files
+                if status != "completed":
+                    detail = (stderr or stdout).strip().splitlines()
+                    if detail:
+                        event_payload["detail"] = detail[0][:240]
+                repo.add_event(
+                    "run_step_completed",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    payload=event_payload,
+                )
+                repo.create_message(
+                    conversation_id,
+                    role="tool",
+                    content=(
+                        f"Executed command:\n{item.command}\n\n"
+                        f"exit_code={int(item.exit_code)}\n"
+                        f"stdout:\n{stdout[:4000]}\n\n"
+                        f"stderr:\n{stderr[:2000]}"
+                    ),
+                    parts=[],
+                    parent_message_id=trigger_message_id,
+                    metadata={"run_id": run_id, "step_index": step_index},
+                )
+
+            summary = f"Step {step_index}: exit_code={int(item.exit_code)}"
+            if status != "completed":
+                detail = (stderr or stdout).strip().splitlines()
+                if detail:
+                    summary += f" ({detail[0][:240]})"
+            tool_summaries.append(summary)
+            tool_results_for_response.append(
+                {
+                    "step_index": step_index,
+                    "status": status,
+                    "exit_code": int(item.exit_code),
+                    "cmd": item.command,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }
+            )
+            for artifact in output_files:
+                lowered = artifact.lower()
+                if lowered in output_file_seen:
+                    continue
+                output_file_seen.add(lowered)
+                output_files_for_response.append(artifact)
+
+        assistant_content = self.planner.sanitize_assistant_text(direct_result.assistant_text or "")
+        if not assistant_content.strip():
+            synthesis_started = time.perf_counter()
+            synthesized = self.planner.synthesize_response(
+                user_message=str(trigger_msg.get("content", "")),
+                planner_text="",
+                project_summary=repo.project_view(),
+                tool_results=tool_results_for_response,
+                output_files=output_files_for_response,
+            )
+            synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
+            if synthesized:
+                assistant_content = synthesized
+        assistant_content = self._append_output_file_tags(assistant_content, output_files_for_response)
+        if failures and tool_summaries:
+            assistant_content += "\n\nExecution summary:\n- " + "\n- ".join(tool_summaries)
+        elif not assistant_content.strip() and tool_summaries:
+            assistant_content = "Execution summary:\n- " + "\n- ".join(tool_summaries)
+
+        total_ms = int((time.perf_counter() - run_started) * 1000)
+        latency_summary_payload = {
+            "planning_ms": planning_ms,
+            "execution_ms": command_exec_ms,
+            "synthesis_ms": synthesis_ms,
+            "rag_scan_ms": scan_ms,
+            "rag_search_ms": search_ms,
+            "total_ms": total_ms,
+        }
+
+        with context.lock:
+            assistant_parts: list[dict[str, Any]] = [{"type": "output_file", "path": path} for path in output_files_for_response[:10]]
+            final_message = repo.create_message(
+                conversation_id,
+                role="assistant",
+                content=assistant_content or "Done.",
+                parts=assistant_parts,
+                parent_message_id=trigger_message_id,
+                metadata={"run_id": run_id},
+            )
+            repo.add_event(
+                "message_finalized",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload={"message_id": final_message["id"]},
+            )
+            if failures:
+                repo.update_run(
+                    run_id,
+                    status="failed",
+                    output_summary=f"{len(direct_result.commands)} step(s), {failures} failed",
+                    error="One or more run steps failed",
+                    finished=True,
+                )
+                repo.add_event(
+                    "run_failed",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    payload={"failures": failures, "latency_ms": latency_summary_payload},
+                )
+            else:
+                repo.update_run(
+                    run_id,
+                    status="done",
+                    output_summary=f"{len(direct_result.commands)} step(s) executed",
+                    finished=True,
+                )
+                repo.add_event(
+                    "run_completed",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    payload={"steps": len(direct_result.commands), "latency_ms": latency_summary_payload},
+                )
+            repo.add_event(
+                "run_latency_summary",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload=latency_summary_payload,
+            )
+
     async def _execute_run(self, *, project_id: str, conversation_id: str, run_id: str, trigger_message_id: str) -> None:
         context = self.project_store.get(project_id)
         if context is None:
@@ -324,6 +573,7 @@ class RunOrchestrator:
         repo = ProjectRepository(context)
         runtime = self._runtime_config()
         run_started = time.perf_counter()
+        execution_mode = runtime.execution_mode if runtime.execution_mode in {"planner", "execute"} else "execute"
         scan_ms = 0
         search_ms = 0
         planning_ms = 0
@@ -333,7 +583,15 @@ class RunOrchestrator:
         try:
             with context.lock:
                 repo.update_run(run_id, status="running")
-                repo.add_event("run_started", conversation_id=conversation_id, run_id=run_id, payload={"trigger_message_id": trigger_message_id})
+                repo.add_event(
+                    "run_started",
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    payload={
+                        "trigger_message_id": trigger_message_id,
+                        "execution_mode": execution_mode,
+                    },
+                )
 
             trigger_msg = repo.get_message(conversation_id, trigger_message_id)
             if not trigger_msg:
@@ -357,7 +615,26 @@ class RunOrchestrator:
             except Exception:
                 logger.exception("RAG context preparation failed run_id=%s", run_id)
 
-            planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=rag_hits)
+            # Keep planner input anchored to the user's prompt + explicit mentions.
+            # Indexed context is still searched/logged for diagnostics, but not inlined into planner text
+            # to avoid noisy tokens hijacking command generation.
+            planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=None)
+            if execution_mode == "execute":
+                await self._execute_direct_mode(
+                    context=context,
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    trigger_message_id=trigger_message_id,
+                    trigger_msg=trigger_msg,
+                    planner_user_message=planner_user_message,
+                    history=history,
+                    skills=skills,
+                    run_started=run_started,
+                    scan_ms=scan_ms,
+                    search_ms=search_ms,
+                )
+                return
             planning_started = time.perf_counter()
             plan = await asyncio.to_thread(
                 self.planner.plan,

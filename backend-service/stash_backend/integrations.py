@@ -56,6 +56,7 @@ def codex_integration_status(runtime: RuntimeConfig) -> dict[str, Any]:
     status: dict[str, Any] = {
         "planner_backend": runtime.planner_backend,
         "codex_mode": runtime.codex_mode,
+        "execution_mode": runtime.execution_mode,
         "codex_bin": runtime.codex_bin,
         "codex_bin_resolved": resolved,
         "codex_available": resolved is not None,
