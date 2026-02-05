@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import asdict
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -83,7 +84,7 @@ def create_app(services: Services) -> FastAPI:
         services.watcher.ensure_project_watch(context.project_id)
 
         project = repo.project_view()
-        project["permission"] = context.permission.__dict__ if context.permission else None
+        project["permission"] = asdict(context.permission) if context.permission else None
         return ProjectResponse(**project)
 
     @app.get("/v1/projects", response_model=list[ProjectResponse])
@@ -92,7 +93,7 @@ def create_app(services: Services) -> FastAPI:
         for context in services.project_store.list_projects():
             repo = ProjectRepository(context)
             project = repo.project_view()
-            project["permission"] = context.permission.__dict__ if context.permission else None
+            project["permission"] = asdict(context.permission) if context.permission else None
             responses.append(ProjectResponse(**project))
         return responses
 
@@ -100,20 +101,20 @@ def create_app(services: Services) -> FastAPI:
     async def get_project(project_id: str) -> ProjectResponse:
         context, repo = _repo_or_404(services, project_id)
         project = repo.project_view()
-        project["permission"] = context.permission.__dict__ if context.permission else None
+        project["permission"] = asdict(context.permission) if context.permission else None
         return ProjectResponse(**project)
 
     @app.patch("/v1/projects/{project_id}", response_model=ProjectResponse)
     async def patch_project(project_id: str, request: ProjectPatchRequest) -> ProjectResponse:
         context, repo = _repo_or_404(services, project_id)
         updated = repo.update_project(name=request.name, active_conversation_id=request.active_conversation_id)
-        updated["permission"] = context.permission.__dict__ if context.permission else None
+        updated["permission"] = asdict(context.permission) if context.permission else None
         return ProjectResponse(**updated)
 
     @app.get("/v1/projects/{project_id}/permissions")
     async def get_permissions(project_id: str) -> dict[str, Any]:
         context, _repo = _repo_or_404(services, project_id)
-        return context.permission.__dict__ if context.permission else {}
+        return asdict(context.permission) if context.permission else {}
 
     @app.post("/v1/projects/{project_id}/conversations", response_model=ConversationResponse)
     async def create_conversation(project_id: str, request: ConversationCreateRequest) -> ConversationResponse:

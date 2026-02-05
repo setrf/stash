@@ -47,6 +47,19 @@ pip install -e .
 uvicorn stash_backend.main:app --host 127.0.0.1 --port 8765 --reload
 ```
 
+## One-command setup from repo root
+
+```bash
+./scripts/install_stack.sh
+./scripts/run_backend.sh
+```
+
+## Smoke test
+
+```bash
+./scripts/smoke_test_backend.sh
+```
+
 ## Key env vars
 
 - `STASH_HOST` (default `127.0.0.1`)

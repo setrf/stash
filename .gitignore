@@ -8,3 +8,9 @@ backend-service/.venv/
 
 # Local project runtime state
 .stash/
+
+# Local env/config
+.env.local
+
+# Packaging artifacts
+*.egg-info/

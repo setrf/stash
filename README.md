@@ -59,5 +59,37 @@ Backend foundation is now implemented under `backend-service/`:
 
 See `backend-service/README.md` for setup and API usage.
 
+## One Install For Frontend + Backend
+
+From repo root:
+
+```bash
+./scripts/install_stack.sh
+```
+
+This does a single local setup for the stack:
+
+- Creates `.venv/`
+- Installs backend dependencies
+- Writes frontend backend URL config at `frontend-macos/Config/Backend.xcconfig`
+- Writes `.env.local` with `STASH_BACKEND_URL=http://127.0.0.1:8765`
+
+Run commands:
+
+```bash
+./scripts/run_backend.sh
+./scripts/run_stack.sh
+./scripts/smoke_test_backend.sh
+```
+
+Equivalent `make` targets:
+
+```bash
+make install
+make run-backend
+make run-stack
+make smoke-test
+```
+
 ## License
 TBD
