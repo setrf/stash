@@ -7,6 +7,7 @@ from unittest import mock
 from stash_backend.config import Settings
 from stash_backend.planner import Planner
 from stash_backend.runtime_config import RuntimeConfig
+from stash_backend.types import TaggedCommand
 
 
 def _project_summary() -> dict[str, str]:
@@ -203,6 +204,81 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(len(result.commands), 1)
         self.assertIn("cat /Users/demo/Documents/resume.md", result.commands[0].cmd)
         self.assertEqual(result.used_fallback, "heuristic_read")
+
+    def test_heuristic_read_plan_rewrites_pdf_to_pypdf_extraction(self) -> None:
+        planner = Planner(Settings(codex_bin="definitely-not-installed", planner_cmd=None))
+        result = planner._heuristic_read_plan(
+            user_message="summarize /Users/demo/Documents/PepeResume.pdf",
+            project_summary=_project_summary(),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result.commands), 1)
+        self.assertIn("python3 -c", result.commands[0].cmd)
+        self.assertIn("PdfReader", result.commands[0].cmd)
+        self.assertNotIn("cat /Users/demo/Documents/PepeResume.pdf", result.commands[0].cmd)
+
+    def test_codex_plan_rewrites_cat_pdf_command(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        codex_text = (
+            "Plan.\n"
+            "<codex_cmd>\n"
+            "worktree: main\n"
+            "cwd: .\n"
+            "cmd: cat PepeResume.pdf\n"
+            "</codex_cmd>"
+        )
+        with (
+            mock.patch.object(planner, "_run_external_planner", return_value=None),
+            mock.patch.object(planner, "_run_codex_planner", return_value=(codex_text, False)),
+            mock.patch.object(planner, "_run_openai_planner", return_value=None),
+        ):
+            result = planner.plan(
+                user_message="summarize PepeResume.pdf",
+                conversation_history=[],
+                skill_bundle="",
+                project_summary=_project_summary(),
+            )
+
+        self.assertEqual(len(result.commands), 1)
+        self.assertIn("python3 -c", result.commands[0].cmd)
+        self.assertIn("PdfReader", result.commands[0].cmd)
+
+    def test_rewrite_pdf_read_commands_keeps_text_file_commands_intact(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+
+        original = [
+            TaggedCommand(raw="", cmd="cat notes.txt", worktree="main", cwd="."),
+            TaggedCommand(raw="", cmd="cat README.md", worktree="main", cwd="."),
+            TaggedCommand(raw="", cmd="cat data.csv", worktree="main", cwd="."),
+        ]
+        rewritten = planner._rewrite_pdf_read_commands(original)
+        self.assertEqual([item.cmd for item in rewritten], [item.cmd for item in original])
+
+    def test_codex_plan_keeps_cat_for_csv_txt_md(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        codex_text = (
+            "Plan.\n"
+            "<codex_cmd>\nworktree: main\ncwd: .\ncmd: cat notes.txt\n</codex_cmd>\n"
+            "<codex_cmd>\nworktree: main\ncwd: .\ncmd: cat README.md\n</codex_cmd>\n"
+            "<codex_cmd>\nworktree: main\ncwd: .\ncmd: cat data.csv\n</codex_cmd>\n"
+        )
+        with (
+            mock.patch.object(planner, "_run_external_planner", return_value=None),
+            mock.patch.object(planner, "_run_codex_planner", return_value=(codex_text, False)),
+            mock.patch.object(planner, "_run_openai_planner", return_value=None),
+        ):
+            result = planner.plan(
+                user_message="read notes.txt README.md and data.csv",
+                conversation_history=[],
+                skill_bundle="",
+                project_summary=_project_summary(),
+            )
+
+        self.assertEqual(len(result.commands), 3)
+        self.assertEqual(result.commands[0].cmd, "cat notes.txt")
+        self.assertEqual(result.commands[1].cmd, "cat README.md")
+        self.assertEqual(result.commands[2].cmd, "cat data.csv")
 
     def test_codex_planner_sets_medium_reasoning_effort(self) -> None:
         planner = Planner(Settings(codex_bin="codex", planner_cmd=None))

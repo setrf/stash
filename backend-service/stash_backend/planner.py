@@ -14,7 +14,7 @@ from .codex import ALLOWED_PREFIXES, parse_tagged_commands
 from .config import Settings
 from .integrations import is_codex_model_config_error, resolve_binary
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
-from .types import PlanResult
+from .types import PlanResult, TaggedCommand
 
 MAX_HISTORY_ITEMS = 10
 MAX_HISTORY_CONTENT_CHARS = 500
@@ -633,6 +633,8 @@ class Planner:
             "- Use at most 8 commands.\n"
             "- One shell command per block.\n"
             f"- Allowed command prefixes only: {allowed_prefixes}.\n"
+            "- For plain text files (.txt, .md, .csv), prefer direct text-safe reads (cat/sed/head/awk) when the user asks to read or summarize contents.\n"
+            "- For PDF reads/summaries, do not use `cat` on .pdf files; extract text first with `python3` + `pypdf`.\n"
             "- Prefer direct python/python3 commands with already-installed packages; avoid `uv run --with ...` unless the user explicitly asks for uv-managed ephemeral dependencies.\n"
             "- Never use sudo, rm -rf, git reset --hard, or destructive commands.\n"
             f"- For changes intended to affect project files, set cwd to this exact project root path: {project_root}.\n"
@@ -871,6 +873,53 @@ class Planner:
         lowered = user_message.lower()
         return any(keyword in lowered for keyword in ACTION_KEYWORDS)
 
+    def _build_pdf_extract_command(self, pdf_path: str) -> str:
+        path_literal = repr(pdf_path)
+        script = (
+            "from pypdf import PdfReader; "
+            f"reader = PdfReader({path_literal}); "
+            "text = '\\n\\n'.join(((page.extract_text() or '').strip()) for page in reader.pages); "
+            "print(text)"
+        )
+        return f"python3 -c {shlex.quote(script)}"
+
+    def _extract_pdf_path_from_read_command(self, cmd: str) -> str | None:
+        try:
+            tokens = shlex.split(cmd)
+        except ValueError:
+            return None
+        if len(tokens) < 2:
+            return None
+        if tokens[0].lower() != "cat":
+            return None
+
+        for token in tokens[1:]:
+            if token.startswith("-"):
+                continue
+            if token.lower().endswith(".pdf"):
+                return token
+            break
+        return None
+
+    def _rewrite_pdf_read_commands(self, commands: list[TaggedCommand]) -> list[TaggedCommand]:
+        rewritten: list[TaggedCommand] = []
+        for command in commands:
+            pdf_path = self._extract_pdf_path_from_read_command(command.cmd)
+            if not pdf_path:
+                rewritten.append(command)
+                continue
+            rewritten_cmd = self._build_pdf_extract_command(pdf_path)
+            logger.info("Planner rewrote PDF read command from cat to python3+pypdf path=%s", pdf_path)
+            rewritten.append(
+                TaggedCommand(
+                    raw=command.raw,
+                    cmd=rewritten_cmd,
+                    worktree=command.worktree,
+                    cwd=command.cwd,
+                )
+            )
+        return rewritten
+
     def _heuristic_read_plan(self, *, user_message: str, project_summary: dict[str, Any]) -> PlanResult | None:
         lowered = user_message.lower()
         if not any(keyword in lowered for keyword in READ_HINT_KEYWORDS):
@@ -893,9 +942,10 @@ class Planner:
             commands = parse_tagged_commands(planner_text)
             if commands:
                 logger.info("Planner selected heuristic read fallback path file=%s", cleaned)
+                rewritten = self._rewrite_pdf_read_commands(commands)
                 return PlanResult(
                     planner_text=planner_text,
-                    commands=commands,
+                    commands=rewritten,
                     used_backend="heuristic",
                     used_fallback="heuristic_read",
                 )
@@ -929,9 +979,10 @@ class Planner:
         commands = parse_tagged_commands(openai_text)
         if commands or not actionable:
             logger.info("Planner selected OpenAI planner path commands=%s", len(commands))
+            rewritten = self._rewrite_pdf_read_commands(commands)
             return PlanResult(
                 planner_text=openai_text,
-                commands=commands,
+                commands=rewritten,
                 timed_out_primary=timed_out_primary,
                 used_backend="openai",
             )
@@ -971,10 +1022,11 @@ class Planner:
             commands = parse_tagged_commands(codex_text)
             if commands or not actionable:
                 logger.info("Planner selected codex planner path commands=%s", len(commands))
+                rewritten = self._rewrite_pdf_read_commands(commands)
                 return PlannerAttemptOutcome(
                     result=PlanResult(
                         planner_text=codex_text,
-                        commands=commands,
+                        commands=rewritten,
                         timed_out_primary=timed_out_primary,
                         used_backend="codex",
                     ),
@@ -1007,10 +1059,11 @@ class Planner:
         commands = parse_tagged_commands(codex_retry_text)
         if commands or not actionable:
             logger.info("Planner selected codex retry path commands=%s", len(commands))
+            rewritten = self._rewrite_pdf_read_commands(commands)
             return PlannerAttemptOutcome(
                 result=PlanResult(
                     planner_text=codex_retry_text,
-                    commands=commands,
+                    commands=rewritten,
                     timed_out_primary=timed_out_primary,
                     used_backend="codex",
                     used_fallback="codex_retry",
@@ -1075,9 +1128,10 @@ class Planner:
             commands = parse_tagged_commands(external_text)
             if commands or not actionable:
                 logger.info("Planner selected external planner path commands=%s", len(commands))
+                rewritten = self._rewrite_pdf_read_commands(commands)
                 return PlanResult(
                     planner_text=external_text,
-                    commands=commands,
+                    commands=rewritten,
                     used_backend="external",
                 )
             logger.warning("External planner returned no commands for actionable request")
