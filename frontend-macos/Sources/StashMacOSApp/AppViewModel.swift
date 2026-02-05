@@ -1342,19 +1342,23 @@ final class AppViewModel: ObservableObject {
         startRunEventStream(projectID: projectID, conversationID: conversationID, runID: runID)
 
         runPollTask = Task {
+            var transientPollErrors = 0
             defer {
                 Task { @MainActor in
                     self.runInProgress = false
-                    self.stopRunEventStream()
-                    self.activeRunID = nil
+                    if self.activeRunID == runID {
+                        self.stopRunEventStream()
+                        self.activeRunID = nil
+                    }
                 }
             }
 
-            for _ in 0 ..< 180 {
+            for _ in 0 ..< 600 {
                 if Task.isCancelled { return }
 
                 do {
                     let run = try await self.client.run(projectID: projectID, runID: runID)
+                    transientPollErrors = 0
                     await MainActor.run {
                         self.runStatusText = "Run \(run.status)"
                         self.updateRunFeedback(run: run)
@@ -1370,6 +1374,25 @@ final class AppViewModel: ObservableObject {
                         return
                     }
                 } catch {
+                    transientPollErrors += 1
+                    let isTimeout: Bool
+                    if case BackendError.requestTimedOut = error {
+                        isTimeout = true
+                    } else {
+                        isTimeout = false
+                    }
+                    if isTimeout, transientPollErrors < 10 {
+                        await MainActor.run {
+                            self.runStatusText = "Run still processing..."
+                            self.appendRunFeedbackEvent(
+                                type: "status",
+                                title: "Waiting for backend...",
+                                detail: "Poll timeout, retrying"
+                            )
+                        }
+                        try? await Task.sleep(for: .seconds(1))
+                        continue
+                    }
                     await MainActor.run {
                         self.runThinkingText = nil
                         self.runPlanningText = "Run polling failed."
@@ -1382,11 +1405,26 @@ final class AppViewModel: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(600))
             }
 
+            do {
+                let finalRun = try await self.client.run(projectID: projectID, runID: runID)
+                if ["done", "failed", "cancelled"].contains(finalRun.status.lowercased()) {
+                    await MainActor.run {
+                        self.runStatusText = finalRun.status.uppercased() + (finalRun.error.map { ": \($0)" } ?? "")
+                    }
+                    if self.selectedConversationID == conversationID {
+                        await self.loadMessages(conversationID: conversationID)
+                    }
+                    return
+                }
+            } catch {
+                // Ignore final probe failure and show non-fatal background state below.
+            }
+
             await MainActor.run {
-                self.runStatusText = "Run timed out"
-                self.runThinkingText = nil
-                self.runPlanningText = "Run timed out."
-                self.appendRunFeedbackEvent(type: "error", title: "Run timed out", detail: nil)
+                self.runStatusText = "Still running in background"
+                self.runThinkingText = "Continuing in background..."
+                self.runPlanningText = "This run is taking longer than expected. You can keep working and it will finish."
+                self.appendRunFeedbackEvent(type: "status", title: "Run still processing", detail: "No final status yet")
             }
         }
     }

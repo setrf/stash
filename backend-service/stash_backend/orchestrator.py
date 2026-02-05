@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -274,6 +275,12 @@ class RunOrchestrator:
         if context is None:
             return
         repo = ProjectRepository(context)
+        run_started = time.perf_counter()
+        scan_ms = 0
+        search_ms = 0
+        planning_ms = 0
+        command_exec_ms = 0
+        synthesis_ms = 0
 
         try:
             with context.lock:
@@ -288,17 +295,22 @@ class RunOrchestrator:
             skills = load_skill_bundle(context.stash_dir)
             rag_hits: list[dict[str, Any]] = []
             try:
+                scan_started = time.perf_counter()
                 await asyncio.to_thread(self.indexer.scan_project_files, context, repo)
+                scan_ms = int((time.perf_counter() - scan_started) * 1000)
+                search_started = time.perf_counter()
                 rag_hits = await asyncio.to_thread(
                     self.indexer.search,
                     repo,
-                    str(trigger_msg.get("content", ""))[:2000],
-                    8,
+                    query=str(trigger_msg.get("content", ""))[:2000],
+                    limit=8,
                 )
+                search_ms = int((time.perf_counter() - search_started) * 1000)
             except Exception:
                 logger.exception("RAG context preparation failed run_id=%s", run_id)
 
             planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=rag_hits)
+            planning_started = time.perf_counter()
             plan = await asyncio.to_thread(
                 self.planner.plan,
                 user_message=planner_user_message,
@@ -306,10 +318,15 @@ class RunOrchestrator:
                 skill_bundle=skills,
                 project_summary=repo.project_view(),
             )
+            planning_ms = int((time.perf_counter() - planning_started) * 1000)
             logger.info(
-                "Planner produced run_id=%s commands=%s",
+                "Planner produced run_id=%s commands=%s planning_ms=%s rag_scan_ms=%s rag_search_ms=%s rag_hits=%s",
                 run_id,
                 len(plan.commands),
+                planning_ms,
+                scan_ms,
+                search_ms,
+                len(rag_hits),
             )
             with context.lock:
                 repo.add_event(
@@ -359,7 +376,10 @@ class RunOrchestrator:
                         )
 
                     try:
+                        step_exec_started = time.perf_counter()
                         result = await asyncio.to_thread(self.codex.execute, context, command)
+                        step_exec_ms = int((time.perf_counter() - step_exec_started) * 1000)
+                        command_exec_ms += step_exec_ms
                         stderr_excerpt = ((result.stderr or "").strip().splitlines() or [""])[0][:240]
                         stdout_excerpt = ((result.stdout or "").strip().splitlines() or [""])[0][:240]
                         failure_detail = stderr_excerpt or stdout_excerpt
@@ -394,6 +414,7 @@ class RunOrchestrator:
                                 "step_index": step_index,
                                 "status": status,
                                 "exit_code": result.exit_code,
+                                "duration_ms": step_exec_ms,
                             }
                             if result.exit_code != 0 and failure_detail:
                                 event_payload["detail"] = failure_detail
@@ -418,6 +439,14 @@ class RunOrchestrator:
                                 parent_message_id=trigger_message_id,
                                 metadata={"run_id": run_id, "step_index": step_index},
                             )
+                        logger.info(
+                            "Run step completed run_id=%s step=%s exit_code=%s duration_ms=%s cmd=%r",
+                            run_id,
+                            step_index,
+                            result.exit_code,
+                            step_exec_ms,
+                            command.cmd[:200],
+                        )
 
                         summary = f"Step {step_index}: exit_code={result.exit_code}"
                         if result.exit_code != 0 and failure_detail:
@@ -462,6 +491,7 @@ class RunOrchestrator:
                             }
                         )
             assistant_content = self.planner.sanitize_assistant_text(plan.planner_text) or plan.planner_text
+            synthesis_started = time.perf_counter()
             synthesized = self.planner.synthesize_response(
                 user_message=str(trigger_msg.get("content", "")),
                 planner_text=plan.planner_text,
@@ -469,6 +499,7 @@ class RunOrchestrator:
                 tool_results=tool_results_for_response,
                 output_files=output_files_for_response,
             )
+            synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
             if synthesized:
                 assistant_content = synthesized
 
@@ -510,7 +541,16 @@ class RunOrchestrator:
                         "run_failed",
                         conversation_id=conversation_id,
                         run_id=run_id,
-                        payload={"failures": failures},
+                        payload={
+                            "failures": failures,
+                            "latency_ms": {
+                                "rag_scan": scan_ms,
+                                "rag_search": search_ms,
+                                "planning": planning_ms,
+                                "execution": command_exec_ms,
+                                "synthesis": synthesis_ms,
+                            },
+                        },
                     )
                 else:
                     repo.update_run(
@@ -523,8 +563,31 @@ class RunOrchestrator:
                         "run_completed",
                         conversation_id=conversation_id,
                         run_id=run_id,
-                        payload={"steps": len(plan.commands)},
+                        payload={
+                            "steps": len(plan.commands),
+                            "latency_ms": {
+                                "rag_scan": scan_ms,
+                                "rag_search": search_ms,
+                                "planning": planning_ms,
+                                "execution": command_exec_ms,
+                                "synthesis": synthesis_ms,
+                            },
+                        },
                     )
+                total_ms = int((time.perf_counter() - run_started) * 1000)
+                logger.info(
+                    "Run latency summary run_id=%s status=%s total_ms=%s planning_ms=%s execution_ms=%s synthesis_ms=%s rag_scan_ms=%s rag_search_ms=%s steps=%s failures=%s",
+                    run_id,
+                    "failed" if failures else "done",
+                    total_ms,
+                    planning_ms,
+                    command_exec_ms,
+                    synthesis_ms,
+                    scan_ms,
+                    search_ms,
+                    len(plan.commands),
+                    failures,
+                )
 
         except asyncio.CancelledError:
             with context.lock:
