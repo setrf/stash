@@ -49,7 +49,7 @@ public struct RootView: View {
         }
         .sheet(isPresented: $viewModel.setupSheetPresented) {
             RuntimeSetupSheet(viewModel: viewModel)
-                .interactiveDismissDisabled(viewModel.onboardingActive && !viewModel.onboardingReadyToFinish)
+                .interactiveDismissDisabled(false)
         }
     }
 }
@@ -701,7 +701,7 @@ private struct RuntimeSetupSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Planner: Codex CLI")
+                Text("Planner: Codex CLI (GPT-5.3 Codex medium default)")
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(CodexTheme.textPrimary)
 
@@ -770,6 +770,11 @@ private struct RuntimeSetupSheet: View {
             }
 
             HStack {
+                Button("Close") {
+                    dismiss()
+                }
+                .buttonStyle(.bordered)
+
                 if viewModel.onboardingActive {
                     Button("Choose Project Folder") {
                         viewModel.presentProjectPicker()

@@ -23,7 +23,7 @@ class RuntimeConfig:
     codex_bin: str = "codex"
     codex_planner_model: str | None = None
     planner_cmd: str | None = None
-    planner_timeout_seconds: int = 150
+    planner_timeout_seconds: int = 60
     openai_api_key: str | None = None
     openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -35,7 +35,7 @@ class RuntimeConfig:
             planner_backend="auto",
             codex_mode=settings.codex_mode or "cli",
             codex_bin=settings.codex_bin or "codex",
-            codex_planner_model=None,
+            codex_planner_model=settings.codex_planner_model or None,
             planner_cmd=settings.planner_cmd,
             planner_timeout_seconds=settings.planner_timeout_seconds,
             openai_api_key=settings.openai_api_key,

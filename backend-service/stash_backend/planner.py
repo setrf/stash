@@ -560,8 +560,11 @@ class Planner:
             "- Never use sudo, rm -rf, git reset --hard, or destructive commands.\n"
             f"- For changes intended to affect project files, set cwd to this exact project root path: {project_root}.\n"
             "- Keep commands inside the project/worktree context.\n"
-            "- If the user asks for a deliverable (summary/report/new version/document/spreadsheet), generate a real output file in the project folder (for example: .txt, .md, .csv, .xlsx, .docx when appropriate).\n"
-            "- In the assistant text, include every produced deliverable file as `<stash_file>relative/path.ext</stash_file>`.\n"
+            "- Output strategy: decide whether output should be inline chat text or a project file.\n"
+            "- Prefer inline chat output for quick questions, explanations, and short answers.\n"
+            "- Create a project file only when it improves usability: user explicitly asks to save/export/create a file, requests a persistent artifact, asks for a reusable draft/template/report, or the result is long/structured enough that a file is better.\n"
+            "- When a file is needed, pick the best format for the task (for example: .txt/.md for narrative notes, .csv/.xlsx for tabular data, .docx for formal docs, .pdf/.pptx only when explicitly requested or clearly required).\n"
+            "- If you create files, include each file path in assistant text as `<stash_file>relative/path.ext</stash_file>`. If no file is created, do not emit stash_file tags.\n"
             f"{final_rule}\n\n"
             f"Project summary JSON:\n{json.dumps(project_summary, ensure_ascii=True)}\n\n"
             f"Recent conversation JSON:\n{json.dumps(normalized_history, ensure_ascii=True)}\n\n"
@@ -689,6 +692,8 @@ class Planner:
             "read-only",
             "-C",
             planning_cwd,
+            "-c",
+            f'reasoning.effort="{CODEX_PLANNER_REASONING_EFFORT}"',
         ]
         cmdline = list(base_cmdline)
         if runtime.codex_planner_model:

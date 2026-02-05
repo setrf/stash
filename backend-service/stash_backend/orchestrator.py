@@ -288,17 +288,19 @@ class RunOrchestrator:
             skills = load_skill_bundle(context.stash_dir)
             rag_hits: list[dict[str, Any]] = []
             try:
-                self.indexer.scan_project_files(context, repo)
-                rag_hits = self.indexer.search(
+                await asyncio.to_thread(self.indexer.scan_project_files, context, repo)
+                rag_hits = await asyncio.to_thread(
+                    self.indexer.search,
                     repo,
-                    query=str(trigger_msg.get("content", ""))[:2000],
-                    limit=8,
+                    str(trigger_msg.get("content", ""))[:2000],
+                    8,
                 )
             except Exception:
                 logger.exception("RAG context preparation failed run_id=%s", run_id)
 
             planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=rag_hits)
-            plan = self.planner.plan(
+            plan = await asyncio.to_thread(
+                self.planner.plan,
                 user_message=planner_user_message,
                 conversation_history=history,
                 skill_bundle=skills,

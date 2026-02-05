@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+DEFAULT_CODEX_PLANNER_MODEL = "gpt-5.3-codex"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -15,8 +17,9 @@ class Settings:
     chunk_overlap_chars: int = 200
     codex_mode: str = "cli"
     codex_bin: str = "codex"
+    codex_planner_model: str = DEFAULT_CODEX_PLANNER_MODEL
     planner_cmd: str | None = None
-    planner_timeout_seconds: int = 150
+    planner_timeout_seconds: int = 60
     openai_api_key: str | None = None
     openai_model: str = "gpt-5"
     openai_base_url: str = "https://api.openai.com/v1"
@@ -38,8 +41,9 @@ def load_settings() -> Settings:
         chunk_overlap_chars=int(os.getenv("STASH_CHUNK_OVERLAP_CHARS", "200")),
         codex_mode=os.getenv("STASH_CODEX_MODE", "cli").strip().lower(),
         codex_bin=os.getenv("STASH_CODEX_BIN", "codex").strip(),
+        codex_planner_model=os.getenv("STASH_CODEX_PLANNER_MODEL", DEFAULT_CODEX_PLANNER_MODEL).strip(),
         planner_cmd=os.getenv("STASH_PLANNER_CMD"),
-        planner_timeout_seconds=int(os.getenv("STASH_PLANNER_TIMEOUT_SECONDS", "150")),
+        planner_timeout_seconds=int(os.getenv("STASH_PLANNER_TIMEOUT_SECONDS", "60")),
         openai_api_key=openai_api_key or None,
         openai_model=os.getenv("STASH_OPENAI_MODEL", "gpt-5").strip(),
         openai_base_url=os.getenv("STASH_OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),

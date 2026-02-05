@@ -45,9 +45,9 @@ final class AppViewModel: ObservableObject {
     @Published var setupPlannerBackend = "auto"
     @Published var setupCodexMode = "cli"
     @Published var setupCodexBin = "codex"
-    @Published var setupCodexPlannerModel = ""
+    @Published var setupCodexPlannerModel = "gpt-5.3-codex"
     @Published var setupPlannerCmd = ""
-    @Published var setupPlannerTimeoutSeconds = "150"
+    @Published var setupPlannerTimeoutSeconds = "60"
     @Published var setupOpenAIAPIKey = ""
     @Published var setupOpenAIModel = "gpt-5"
     @Published var setupOpenAIBaseURL = "https://api.openai.com/v1"
@@ -79,16 +79,17 @@ final class AppViewModel: ObservableObject {
     private let lastProjectPathKey = "stash.lastProjectPath"
     private let lastProjectBookmarkKey = "stash.lastProjectFolderBookmark"
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
+    private let recommendedCodexModel = "gpt-5.3-codex"
     private let initialProjectRootURL: URL?
     private var activeSecurityScopedProjectURL: URL?
     private var activeRunID: String?
     private var lastRunEventID = 0
     private var client: BackendClient
     private let baseCodexModelPresets: [CodexModelPreset] = [
-        CodexModelPreset(value: "", label: "Default (latest)", hint: "Best compatibility"),
-        CodexModelPreset(value: "gpt-5", label: "gpt-5", hint: "Higher quality"),
-        CodexModelPreset(value: "gpt-5-mini", label: "gpt-5-mini", hint: "Faster"),
-        CodexModelPreset(value: "gpt-5-nano", label: "gpt-5-nano", hint: "Fastest"),
+        CodexModelPreset(value: "gpt-5.3-codex", label: "GPT-5.3 Codex (medium)", hint: "Recommended default"),
+        CodexModelPreset(value: "gpt-5.3-codex-low", label: "GPT-5.3 Codex (low)", hint: "Fastest"),
+        CodexModelPreset(value: "gpt-5.3-codex-high", label: "GPT-5.3 Codex (high)", hint: "Best quality"),
+        CodexModelPreset(value: "", label: "CLI default (latest)", hint: "Use your Codex CLI default"),
     ]
 
     init(initialProjectRootURL: URL? = nil) {
@@ -244,7 +245,7 @@ final class AppViewModel: ObservableObject {
             setupPlannerBackend = config.plannerBackend
             setupCodexMode = config.codexMode
             setupCodexBin = status.codexBinResolved ?? config.codexBin
-            setupCodexPlannerModel = config.codexPlannerModel
+            setupCodexPlannerModel = suggestedCodexPlannerModel(config.codexPlannerModel)
             setupPlannerCmd = config.plannerCmd ?? ""
             setupPlannerTimeoutSeconds = String(config.plannerTimeoutSeconds)
             setupOpenAIModel = config.openaiModel
@@ -282,16 +283,17 @@ final class AppViewModel: ObservableObject {
 
         let openAIKeyTrimmed = setupOpenAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let codexModelTrimmed = setupCodexPlannerModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let codexModelToPersist = normalizedLegacyCodexPlannerModel(codexModelTrimmed)
 
         do {
             _ = try await client.updateRuntimeConfig(
                 plannerBackend: "auto",
                 codexMode: "cli",
                 codexBin: setupCodexBin.isEmpty ? "codex" : setupCodexBin,
-                codexPlannerModel: codexModelTrimmed,
+                codexPlannerModel: codexModelToPersist,
                 plannerCmd: nil,
                 clearPlannerCmd: true,
-                plannerTimeoutSeconds: 150,
+                plannerTimeoutSeconds: 60,
                 openaiAPIKey: openAIKeyTrimmed.isEmpty ? nil : openAIKeyTrimmed,
                 clearOpenAIAPIKey: false,
                 openaiModel: "gpt-5",
@@ -310,6 +312,24 @@ final class AppViewModel: ObservableObject {
         } catch {
             setupStatusText = "Could not save setup: \(setupErrorMessage(from: error))"
         }
+    }
+
+    private func suggestedCodexPlannerModel(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return recommendedCodexModel
+        }
+        return normalizedLegacyCodexPlannerModel(trimmed)
+    }
+
+    private func normalizedLegacyCodexPlannerModel(_ value: String) -> String {
+        if value.caseInsensitiveCompare("gpt-5") == .orderedSame {
+            return recommendedCodexModel
+        }
+        if value.caseInsensitiveCompare("gpt-5-codex") == .orderedSame {
+            return recommendedCodexModel
+        }
+        return value
     }
 
     private func setupErrorMessage(from error: Error) -> String {
@@ -767,6 +787,7 @@ final class AppViewModel: ObservableObject {
             return
         }
 
+        detachRunTrackingFromCurrentConversation()
         let title = "Session \(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .short))"
         do {
             let conv = try await client.createConversation(projectID: projectID, title: title)
@@ -780,6 +801,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func selectConversation(id: String) async {
+        detachRunTrackingFromCurrentConversation()
         selectedConversationID = id
         await loadMessages(conversationID: id)
     }
@@ -788,18 +810,23 @@ final class AppViewModel: ObservableObject {
         guard let projectID = project?.id else { return }
         do {
             let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
+            guard selectedConversationID == conversationID else { return }
             messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
             errorText = nil
         } catch BackendError.requestTimedOut {
+            guard selectedConversationID == conversationID else { return }
             errorText = "Could not load messages in time. Retrying..."
             do {
                 let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
+                guard selectedConversationID == conversationID else { return }
                 messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
                 errorText = nil
             } catch {
+                guard selectedConversationID == conversationID else { return }
                 errorText = "Could not load messages: \(error.localizedDescription)"
             }
         } catch {
+            guard selectedConversationID == conversationID else { return }
             errorText = "Could not load messages: \(error.localizedDescription)"
         }
     }
@@ -1223,6 +1250,16 @@ final class AppViewModel: ObservableObject {
         runEventStreamTask = nil
     }
 
+    private func detachRunTrackingFromCurrentConversation() {
+        runPollTask?.cancel()
+        runPollTask = nil
+        stopRunEventStream()
+        activeRunID = nil
+        runInProgress = false
+        runStatusText = nil
+        resetRunFeedback(clearEvents: true)
+    }
+
     func sendComposerMessage() async {
         let content = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
@@ -1327,7 +1364,9 @@ final class AppViewModel: ObservableObject {
                         await MainActor.run {
                             self.runStatusText = run.status.uppercased() + (run.error.map { ": \($0)" } ?? "")
                         }
-                        await self.loadMessages(conversationID: conversationID)
+                        if self.selectedConversationID == conversationID {
+                            await self.loadMessages(conversationID: conversationID)
+                        }
                         return
                     }
                 } catch {

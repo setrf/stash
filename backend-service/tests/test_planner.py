@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import unittest
 from unittest import mock
 
@@ -13,6 +14,44 @@ def _project_summary() -> dict[str, str]:
 
 
 class PlannerTests(unittest.TestCase):
+    def test_runtime_config_defaults_to_gpt_5_3_codex(self) -> None:
+        runtime = RuntimeConfig.from_settings(Settings())
+        self.assertEqual(runtime.codex_planner_model, "gpt-5.3-codex")
+
+    def test_planner_prompt_uses_output_strategy_not_forced_file_creation(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        prompt = planner._build_planner_prompt(
+            user_message="explain what this function does",
+            conversation_history=[],
+            skill_bundle="",
+            project_summary=_project_summary(),
+            max_history_items=5,
+            max_history_content_chars=300,
+            max_skills_chars=1000,
+            require_commands=False,
+        )
+
+        self.assertIn("Output strategy: decide whether output should be inline chat text or a project file.", prompt)
+        self.assertIn("Prefer inline chat output for quick questions", prompt)
+        self.assertNotIn("generate a real output file", prompt)
+
+    def test_planner_prompt_mentions_format_selection_for_artifacts(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        prompt = planner._build_planner_prompt(
+            user_message="create a spreadsheet of expenses and save it",
+            conversation_history=[],
+            skill_bundle="",
+            project_summary=_project_summary(),
+            max_history_items=5,
+            max_history_content_chars=300,
+            max_skills_chars=1000,
+            require_commands=True,
+        )
+
+        self.assertIn("pick the best format for the task", prompt)
+        self.assertIn(".csv/.xlsx", prompt)
+        self.assertIn("If you create files, include each file path", prompt)
+
     def test_actionable_message_without_planners_keeps_original_fallback(self) -> None:
         planner = Planner(Settings(codex_bin="definitely-not-installed", planner_cmd=None))
         result = planner.plan(
@@ -130,6 +169,31 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(mocked_run.call_count, 2)
         self.assertEqual(len(result.commands), 1)
         self.assertEqual(result.commands[0].cmd, "echo ok")
+
+    def test_codex_planner_sets_medium_reasoning_effort(self) -> None:
+        planner = Planner(Settings(codex_bin="codex", planner_cmd=None))
+        proc = subprocess.CompletedProcess(
+            args=["codex", "exec"],
+            returncode=0,
+            stdout='{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\n',
+            stderr="",
+        )
+        with (
+            mock.patch.object(planner, "_codex_available", return_value=True),
+            mock.patch("stash_backend.planner.resolve_binary", return_value="/usr/bin/codex"),
+            mock.patch("stash_backend.planner.subprocess.run", return_value=proc) as mocked_run,
+        ):
+            planner._run_codex_planner(
+                user_message="read notes.txt",
+                conversation_history=[],
+                skill_bundle="",
+                project_summary=_project_summary(),
+                runtime=RuntimeConfig(codex_bin="codex", codex_planner_model="gpt-5.3-codex"),
+            )
+
+        called_cmdline = mocked_run.call_args.args[0]
+        self.assertIn('-c', called_cmdline)
+        self.assertIn('reasoning.effort="medium"', called_cmdline)
 
 
 if __name__ == "__main__":
