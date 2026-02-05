@@ -60,11 +60,14 @@ final class AppViewModel: ObservableObject {
     private let lastProjectPathKey = "stash.lastProjectPath"
     private let lastProjectBookmarkKey = "stash.lastProjectFolderBookmark"
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
+    private let initialProjectRootURL: URL?
     private var activeSecurityScopedProjectURL: URL?
     private var client: BackendClient
 
-    init() {
-        client = BackendClient(baseURL: URL(string: "http://127.0.0.1:8765")!)
+    init(initialProjectRootURL: URL? = nil) {
+        self.initialProjectRootURL = initialProjectRootURL
+        let defaultURL = ProcessInfo.processInfo.environment["STASH_BACKEND_URL"] ?? "http://127.0.0.1:8765"
+        client = BackendClient(baseURL: URL(string: defaultURL) ?? URL(string: "http://127.0.0.1:8765")!)
     }
 
     deinit {
@@ -143,6 +146,11 @@ final class AppViewModel: ObservableObject {
            FileManager.default.fileExists(atPath: restored.url.path)
         {
             await openProject(url: restored.url, bookmarkData: restored.bookmarkData)
+            return
+        }
+
+        if let initialProjectRootURL {
+            await openProject(url: initialProjectRootURL)
             return
         }
 

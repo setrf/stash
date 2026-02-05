@@ -1,4 +1,5 @@
 import SwiftUI
+import StashMacOSCore
 
 @main
 struct StashMacOSApp: App {

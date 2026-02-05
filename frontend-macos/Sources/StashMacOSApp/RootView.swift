@@ -1,10 +1,22 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct RootView: View {
-    @StateObject private var viewModel = AppViewModel()
+public struct RootView: View {
+    @StateObject private var viewModel: AppViewModel
 
-    var body: some View {
+    public init(initialProjectRootPath: String? = nil) {
+        if let initialProjectRootPath {
+            _viewModel = StateObject(
+                wrappedValue: AppViewModel(
+                    initialProjectRootURL: URL(fileURLWithPath: initialProjectRootPath, isDirectory: true)
+                )
+            )
+        } else {
+            _viewModel = StateObject(wrappedValue: AppViewModel())
+        }
+    }
+
+    public var body: some View {
         VStack(spacing: 0) {
             MinimalTopBar(viewModel: viewModel)
                 .padding(.horizontal, 16)
@@ -360,7 +372,7 @@ private struct ChatPanel: View {
                     .padding(6)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(CodexTheme.border, lineWidth: 1))
-                    .onChange(of: viewModel.composerText) { _, _ in
+                    .onChange(of: viewModel.composerText) {
                         viewModel.composerDidChange()
                     }
 
@@ -727,7 +739,7 @@ private struct MessageTimeline: View {
                 }
                 .padding(18)
             }
-            .onChange(of: messages.count) { _, _ in
+            .onChange(of: messages.count) {
                 if let last = messages.last {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(last.id, anchor: .bottom)

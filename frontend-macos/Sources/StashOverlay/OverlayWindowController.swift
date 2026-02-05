@@ -1,12 +1,13 @@
 import AppKit
 import QuartzCore
+import StashMacOSCore
 import SwiftUI
 
 final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     private let viewModel: OverlayViewModel
     private let panel: OverlayPanel
     private var projectPopover: NSPopover?
-    private var chatWindowControllers: [String: ProjectChatWindowController] = [:]
+    private var workspaceWindowControllers: [String: ProjectWorkspaceWindowController] = [:]
     private var shouldPresentProjectPickerOnActivate = false
 
     init(viewModel: OverlayViewModel) {
@@ -122,7 +123,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
                 preferredProjectID: viewModel.selectedProject?.id
             )
             projectPopover?.performClose(nil)
-            openChatWindow(for: project)
+            openWorkspaceWindow(for: project)
             try await viewModel.backendClient.registerAssets(urls: urls, projectID: project.id)
         } catch {
             print("Asset drop handling failed: \(error)")
@@ -160,7 +161,7 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return }
             self.viewModel.selectedProject = project
             self.projectPopover?.performClose(nil)
-            self.openChatWindow(for: project)
+            self.openWorkspaceWindow(for: project)
         }
 
         let popover = NSPopover()
@@ -174,21 +175,21 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @MainActor
-    private func openChatWindow(for project: OverlayProject) {
+    private func openWorkspaceWindow(for project: OverlayProject) {
         viewModel.selectedProject = project
 
-        if let existing = chatWindowControllers[project.id] {
+        if let existing = workspaceWindowControllers[project.id] {
             existing.showWindow(nil)
             existing.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
-        let controller = ProjectChatWindowController(project: project, backendClient: viewModel.backendClient)
+        let controller = ProjectWorkspaceWindowController(project: project)
         controller.onWindowClosed = { [weak self] projectID in
-            self?.chatWindowControllers.removeValue(forKey: projectID)
+            self?.workspaceWindowControllers.removeValue(forKey: projectID)
         }
-        chatWindowControllers[project.id] = controller
+        workspaceWindowControllers[project.id] = controller
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
