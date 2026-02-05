@@ -126,7 +126,17 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
             )
             projectPopover?.performClose(nil)
             openWorkspaceWindow(for: project)
-            try await viewModel.backendClient.registerAssets(urls: urls, projectID: project.id)
+            let imported = importDroppedFiles(urls, into: project)
+            guard !imported.urls.isEmpty else {
+                if !imported.failures.isEmpty {
+                    print("Asset drop import failed: \(imported.failures.joined(separator: " | "))")
+                }
+                return
+            }
+            try await viewModel.backendClient.registerAssets(urls: imported.urls, projectID: project.id)
+            if !imported.failures.isEmpty {
+                print("Asset drop partially imported: \(imported.failures.joined(separator: " | "))")
+            }
         } catch {
             print("Asset drop handling failed: \(error)")
         }
@@ -237,6 +247,116 @@ final class OverlayWindowController: NSWindowController, NSWindowDelegate {
 
     private func makeAttachmentKey(projectID: String, documentURL: URL) -> String {
         "\(projectID)|\(documentURL.standardizedFileURL.path)"
+    }
+
+    private struct ImportedDropResult {
+        var urls: [URL]
+        var failures: [String]
+    }
+
+    private func importDroppedFiles(_ urls: [URL], into project: OverlayProject) -> ImportedDropResult {
+        let root = URL(fileURLWithPath: project.rootPath, isDirectory: true).standardizedFileURL
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            return ImportedDropResult(urls: [], failures: [error.localizedDescription])
+        }
+
+        var imported: [URL] = []
+        var failures: [String] = []
+        var uniqueByPath: [String: URL] = [:]
+        for url in urls {
+            uniqueByPath[url.standardizedFileURL.path] = url.standardizedFileURL
+        }
+
+        for source in uniqueByPath.values.sorted(by: { $0.path < $1.path }) {
+            do {
+                let destination = try transferDroppedItem(from: source, to: root, projectRoot: root)
+                imported.append(destination)
+            } catch {
+                failures.append("\(source.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        return ImportedDropResult(urls: imported, failures: failures)
+    }
+
+    private func transferDroppedItem(from sourceURL: URL, to destinationBase: URL, projectRoot: URL) throws -> URL {
+        let fm = FileManager.default
+        let source = sourceURL.standardizedFileURL
+        let sourceAccess = source.startAccessingSecurityScopedResource()
+        defer {
+            if sourceAccess {
+                source.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        guard fm.fileExists(atPath: source.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        let desiredDestination = destinationBase.appendingPathComponent(source.lastPathComponent)
+        let destination = uniqueDestinationURL(for: desiredDestination)
+        guard isInsideProject(destination, root: projectRoot) else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+
+        let sourceInsideProject = isInsideProject(source, root: projectRoot)
+        if sourceInsideProject {
+            if source.standardizedFileURL == destination.standardizedFileURL {
+                return destination
+            }
+            if isDescendant(destination, of: source) {
+                throw NSError(
+                    domain: NSCocoaErrorDomain,
+                    code: NSFeatureUnsupportedError,
+                    userInfo: [NSLocalizedDescriptionKey: "Cannot move a folder into itself."]
+                )
+            }
+            try fm.moveItem(at: source, to: destination)
+            return destination
+        }
+
+        try fm.copyItem(at: source, to: destination)
+        return destination
+    }
+
+    private func uniqueDestinationURL(for requested: URL) -> URL {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: requested.path) {
+            return requested
+        }
+
+        let ext = requested.pathExtension
+        let stem = requested.deletingPathExtension().lastPathComponent
+        let parent = requested.deletingLastPathComponent()
+
+        for index in 1 ... 999 {
+            let candidateName: String
+            if ext.isEmpty {
+                candidateName = "\(stem)-\(index)"
+            } else {
+                candidateName = "\(stem)-\(index).\(ext)"
+            }
+            let candidate = parent.appendingPathComponent(candidateName)
+            if !fm.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+
+        return parent.appendingPathComponent(UUID().uuidString + (ext.isEmpty ? "" : ".\(ext)"))
+    }
+
+    private func isInsideProject(_ candidate: URL, root: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let rootPath = root.standardizedFileURL.path
+        return candidatePath == rootPath || candidatePath.hasPrefix(rootPath + "/")
+    }
+
+    private func isDescendant(_ candidate: URL, of ancestor: URL) -> Bool {
+        let candidatePath = candidate.standardizedFileURL.path
+        let ancestorPath = ancestor.standardizedFileURL.path
+        return candidatePath == ancestorPath || candidatePath.hasPrefix(ancestorPath + "/")
     }
 }
 

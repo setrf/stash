@@ -2,7 +2,7 @@ import SwiftUI
 import StashMacOSCore
 
 @main
-struct StashMacOSApp: App {
+struct StashDesktopApp: App {
     var body: some Scene {
         WindowGroup("Stash") {
             RootView()

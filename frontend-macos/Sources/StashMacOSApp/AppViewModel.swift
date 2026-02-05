@@ -224,7 +224,7 @@ final class AppViewModel: ObservableObject {
                 }
             }
         } catch {
-            setupStatusText = "Could not load setup status: \(error.localizedDescription)"
+            setupStatusText = "Could not load setup status: \(setupErrorMessage(from: error))"
         }
     }
 
@@ -263,10 +263,16 @@ final class AppViewModel: ObservableObject {
                 setupStatusText = "AI setup is ready. Select a project folder, then finish onboarding."
             }
         } catch {
-            setupStatusText = "Could not save setup: \(error.localizedDescription)"
+            setupStatusText = "Could not save setup: \(setupErrorMessage(from: error))"
         }
     }
 
+    private func setupErrorMessage(from error: Error) -> String {
+        if case let BackendError.httpError(code, _) = error, code == 404 {
+            return "Backend API route not found (404). Restart backend with ./scripts/run_backend.sh, then relaunch the app."
+        }
+        return error.localizedDescription
+    }
     func presentProjectPicker() {
         guard !isPresentingProjectPicker else { return }
         isPresentingProjectPicker = true

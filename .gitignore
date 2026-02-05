@@ -33,3 +33,8 @@ frontend-macos/Resources/AppIcon.iconset/
 
 # App logs
 *.log
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class

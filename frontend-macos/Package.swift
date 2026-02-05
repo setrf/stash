@@ -13,7 +13,7 @@ let package = Package(
         ),
         .executable(
             name: "StashMacOSApp",
-            targets: ["StashMacOSApp"]
+            targets: ["StashMacOSAppExecutable"]
         ),
         .executable(
             name: "StashOverlay",
@@ -24,21 +24,11 @@ let package = Package(
         .target(
             name: "StashMacOSCore",
             path: "Sources/StashMacOSApp",
-            exclude: ["StashMacOSApp.swift"]
         ),
         .executableTarget(
-            name: "StashMacOSApp",
+            name: "StashMacOSAppExecutable",
             dependencies: ["StashMacOSCore"],
-            path: "Sources/StashMacOSApp",
-            exclude: [
-                "AppViewModel.swift",
-                "BackendClient.swift",
-                "FileScanner.swift",
-                "Models.swift",
-                "RootView.swift",
-                "Theme.swift"
-            ],
-            sources: ["StashMacOSApp.swift"]
+            path: "Sources/StashMacOSAppExecutable"
         ),
         .executableTarget(
             name: "StashOverlay",
