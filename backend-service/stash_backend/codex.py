@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import subprocess
@@ -123,6 +124,98 @@ class CodexExecutor:
         if head not in ALLOWED_PREFIXES:
             raise CodexCommandError(f"Command prefix '{head}' is not in allowlist")
 
+    def _build_codex_exec_prompt(self, command: str) -> str:
+        return (
+            "Execute exactly one shell command in the current working directory.\n"
+            "Do not run additional commands.\n"
+            "Do not reformat or modify the command.\n"
+            "Command:\n"
+            f"{command}\n"
+        )
+
+    def _run_command_via_shell(self, *, cwd: Path, command: str) -> tuple[int, str, str]:
+        proc = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        return int(proc.returncode), proc.stdout, proc.stderr
+
+    def _parse_codex_json_events(self, output: str) -> tuple[int, str, str]:
+        command_event: dict[str, object] | None = None
+        last_agent_message = ""
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if event.get("type") != "item.completed":
+                continue
+            item = event.get("item") or {}
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "command_execution":
+                command_event = item
+            elif item_type == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    last_agent_message = text
+
+        if command_event is None:
+            # Codex returned no executable event; surface raw output for visibility.
+            return 1, "", output.strip() or "Codex CLI did not emit command execution output."
+
+        exit_code = int(command_event.get("exit_code") or 0)
+        aggregated = str(command_event.get("aggregated_output") or "")
+        status = str(command_event.get("status") or "")
+
+        if exit_code == 0:
+            return exit_code, aggregated, ""
+
+        if aggregated:
+            return exit_code, "", aggregated
+        if last_agent_message:
+            return exit_code, "", last_agent_message
+        return exit_code, "", f"Command failed (status={status or 'failed'})"
+
+    def _run_command_via_codex_cli(self, *, cwd: Path, command: str) -> tuple[int, str, str]:
+        prompt = self._build_codex_exec_prompt(command)
+        cmdline = [
+            self.settings.codex_bin,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-s",
+            "workspace-write",
+            "-C",
+            str(cwd),
+            prompt,
+        ]
+
+        proc = subprocess.run(
+            cmdline,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "").strip() or "Codex CLI failed"
+            return proc.returncode, "", stderr
+
+        return self._parse_codex_json_events(proc.stdout or "")
+
     def execute(self, context: ProjectContext, command: TaggedCommand) -> ExecutionResult:
         self._validate_command(command.cmd)
 
@@ -139,40 +232,20 @@ class CodexExecutor:
             )
 
         started_at = utc_now_iso()
-
-        if self.settings.codex_mode == "cli":
-            cmdline = [self.settings.codex_bin, "exec", "--cwd", str(cwd), command.cmd]
-            engine = "codex-cli"
-        else:
-            cmdline = ["bash", "-lc", command.cmd]
-            engine = "shell"
+        engine = "shell"
 
         try:
-            proc = subprocess.run(
-                cmdline,
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=600,
-                check=False,
-            )
-            exit_code = int(proc.returncode)
-            stdout = proc.stdout
-            stderr = proc.stderr
+            if self.settings.codex_mode == "cli":
+                exit_code, stdout, stderr = self._run_command_via_codex_cli(cwd=cwd, command=command.cmd)
+                engine = "codex-cli"
+            else:
+                exit_code, stdout, stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
+                engine = "shell"
         except FileNotFoundError:
             if self.settings.codex_mode == "cli":
                 # Fallback keeps the pipeline functional when codex binary is missing.
-                proc = subprocess.run(
-                    ["bash", "-lc", command.cmd],
-                    cwd=str(cwd),
-                    capture_output=True,
-                    text=True,
-                    timeout=600,
-                    check=False,
-                )
-                exit_code = int(proc.returncode)
-                stdout = proc.stdout
-                stderr = f"codex binary not found; executed via shell fallback\n{proc.stderr}"
+                exit_code, stdout, shell_stderr = self._run_command_via_shell(cwd=cwd, command=command.cmd)
+                stderr = f"codex binary not found; executed via shell fallback\n{shell_stderr}"
                 engine = "shell-fallback"
             else:
                 raise CodexCommandError("Execution binary not found")

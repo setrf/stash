@@ -12,6 +12,7 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 BACKEND_URL="${STASH_BACKEND_URL:-http://127.0.0.1:8765}"
 RUNTIME_BASE="${STASH_RUNTIME_BASE:-$HOME/Library/Application Support/StashLocal/runtime}"
 BACKEND_VENV="$RUNTIME_BASE/.venv"
+BACKEND_CODEX_MODE="${STASH_CODEX_MODE:-cli}"
 ICON_SOURCE="${STASH_ICON_SOURCE:-$ROOT_DIR/frontend-macos/Resources/AppIcon-source.png}"
 ICON_ICNS="${STASH_ICON_ICNS:-$ROOT_DIR/frontend-macos/Resources/AppIcon.icns}"
 
@@ -130,6 +131,7 @@ PLIST
 cat > "$APP_RESOURCES/launcher.conf" << EOF_CONF
 STASH_BACKEND_VENV="$BACKEND_VENV"
 STASH_BACKEND_URL="$BACKEND_URL"
+STASH_CODEX_MODE="$BACKEND_CODEX_MODE"
 EOF_CONF
 
 cat > "$APP_MACOS/StashDesktopLauncher" << 'EOF_LAUNCHER'
@@ -192,6 +194,7 @@ if [ ! -x "$FRONTEND_BIN" ]; then
 fi
 
 export STASH_BACKEND_URL
+export STASH_CODEX_MODE
 "$FRONTEND_BIN" >>"$LOG_DIR/frontend.log" 2>&1 || true
 
 if [ "$backend_started_by_launcher" -eq 1 ] && [ -f "$BACKEND_PID_FILE" ]; then

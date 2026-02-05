@@ -71,7 +71,9 @@ This does a single local setup for the stack:
 
 - Creates `.venv/`
 - Installs backend dependencies
-- Writes `.env.local` with `STASH_BACKEND_URL=http://127.0.0.1:8765`
+- Writes `.env.local` with:
+  - `STASH_BACKEND_URL=http://127.0.0.1:8765`
+  - `STASH_CODEX_MODE=cli`
 - Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 
 Run commands:
@@ -96,6 +98,9 @@ Frontend run/integration notes:
 - `docs/FRONTEND_BACKEND_RUN.md`
 - `frontend-macos/README.md`
 - `docs/DESKTOP_INSTALLER.md`
+
+Codex requirement:
+- Run `codex login status` once before using chat runs so planner/executor can use local Codex CLI.
 
 ## License
 TBD

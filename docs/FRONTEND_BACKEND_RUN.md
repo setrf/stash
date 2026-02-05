@@ -14,6 +14,7 @@ This creates `.venv/`, installs backend dependencies, and writes `.env.local` wi
 
 ```text
 STASH_BACKEND_URL=http://127.0.0.1:8765
+STASH_CODEX_MODE=cli
 ```
 
 Optional: generate frontend config file directly from install script:
@@ -26,6 +27,12 @@ STASH_FRONTEND_CONFIG_PATH="/absolute/path/to/Backend.xcconfig" ./scripts/instal
 
 ```bash
 ./scripts/run_backend.sh
+```
+
+For Codex-backed planning/execution, confirm local login once:
+
+```bash
+codex login status
 ```
 
 Health check:

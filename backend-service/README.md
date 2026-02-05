@@ -73,11 +73,14 @@ STASH_FRONTEND_CONFIG_PATH="/absolute/path/to/Backend.xcconfig" ./scripts/instal
 - `STASH_SCAN_INTERVAL_SECONDS` (default `5`)
 - `STASH_VECTOR_DIM` (default `256`)
 - `STASH_MAX_FILE_SIZE_BYTES` (default `5242880`)
-- `STASH_CODEX_MODE` (`shell` or `cli`, default `shell`)
+- `STASH_CODEX_MODE` (`shell` or `cli`, default `cli`)
 - `STASH_CODEX_BIN` (default `codex`)
 - `STASH_PLANNER_CMD` (optional external planner command)
+- `STASH_PLANNER_TIMEOUT_SECONDS` (default `150`)
 
 ## Notes
 
-- The planner supports tagged command protocol directly and can be upgraded to GPT planning via `STASH_PLANNER_CMD`.
+- If `STASH_PLANNER_CMD` is unset, planner defaults to Codex CLI planning (`codex exec` in read-only mode).
+- Ensure local auth is ready: `codex login status` should report logged in.
+- Tagged command protocol is still supported directly for explicit runs.
 - The vector index uses local hashed embeddings by default, so no cloud dependency is required for search.

@@ -22,6 +22,7 @@ Optional overrides:
 STASH_DESKTOP_TARGET_DIR="/Applications" \
 STASH_DESKTOP_APP_NAME="Stash Local.app" \
 STASH_BACKEND_URL="http://127.0.0.1:8765" \
+STASH_CODEX_MODE="cli" \
 ./scripts/desktop/install_desktop_app.sh
 ```
 
@@ -44,6 +45,12 @@ STASH_ICON_SOURCE="/absolute/path/to/icon.png" ./scripts/desktop/install_desktop
 ## Run
 
 Double-click the installed app bundle (for example on Desktop).
+
+For Codex-backed planning/execution, ensure your local CLI is authenticated once:
+
+```bash
+codex login status
+```
 
 What it does on launch:
 

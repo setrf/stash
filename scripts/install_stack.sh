@@ -20,6 +20,7 @@ python -m pip install -e "$BACKEND_DIR"
 
 cat > "$ROOT_DIR/.env.local" << ENV
 STASH_BACKEND_URL=http://127.0.0.1:8765
+STASH_CODEX_MODE=cli
 ENV
 
 if [ -n "$FRONTEND_CONFIG_PATH" ]; then
