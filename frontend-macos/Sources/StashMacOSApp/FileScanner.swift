@@ -40,12 +40,7 @@ struct FileScanner {
             )
         }
 
-        files.sort {
-            if $0.isDirectory != $1.isDirectory {
-                return $0.isDirectory && !$1.isDirectory
-            }
-            return $0.relativePath.localizedCaseInsensitiveCompare($1.relativePath) == .orderedAscending
-        }
+        files.sort(by: compareHierarchy)
 
         return files
     }
@@ -57,5 +52,23 @@ struct FileScanner {
             hasher.combine(item.isDirectory)
         }
         return hasher.finalize()
+    }
+
+    private static func compareHierarchy(lhs: FileItem, rhs: FileItem) -> Bool {
+        let lhsComponents = lhs.relativePath.split(separator: "/").map(String.init)
+        let rhsComponents = rhs.relativePath.split(separator: "/").map(String.init)
+
+        let lhsParent = lhsComponents.dropLast().joined(separator: "/")
+        let rhsParent = rhsComponents.dropLast().joined(separator: "/")
+
+        if lhsParent != rhsParent {
+            return lhs.relativePath.localizedCaseInsensitiveCompare(rhs.relativePath) == .orderedAscending
+        }
+
+        if lhs.isDirectory != rhs.isDirectory {
+            return lhs.isDirectory && !rhs.isDirectory
+        }
+
+        return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
     }
 }

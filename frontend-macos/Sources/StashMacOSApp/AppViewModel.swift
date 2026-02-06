@@ -24,6 +24,7 @@ final class AppViewModel: ObservableObject {
     @Published var messages: [Message] = []
 
     @Published var files: [FileItem] = []
+    @Published var collapsedDirectoryPaths: Set<String> = []
     @Published var fileQuery = ""
 
     @Published var composerText = ""
@@ -129,11 +130,13 @@ final class AppViewModel: ObservableObject {
 
     var filteredFiles: [FileItem] {
         let trimmed = fileQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return files }
-        return files.filter {
-            $0.relativePath.localizedCaseInsensitiveContains(trimmed) ||
-                $0.name.localizedCaseInsensitiveContains(trimmed)
+        if !trimmed.isEmpty {
+            return files.filter {
+                $0.relativePath.localizedCaseInsensitiveContains(trimmed) ||
+                    $0.name.localizedCaseInsensitiveContains(trimmed)
+            }
         }
+        return files.filter { !hasCollapsedAncestor($0) }
     }
 
     var visibleMessages: [Message] {
@@ -166,6 +169,20 @@ final class AppViewModel: ObservableObject {
             composerText = composerText + (composerText.hasSuffix(" ") || composerText.isEmpty ? "" : " ") + replacement
         }
         refreshMentionState()
+    }
+
+    func isDirectoryExpanded(_ item: FileItem) -> Bool {
+        guard item.isDirectory else { return true }
+        return !collapsedDirectoryPaths.contains(item.relativePath)
+    }
+
+    func toggleDirectoryExpanded(_ item: FileItem) {
+        guard item.isDirectory else { return }
+        if collapsedDirectoryPaths.contains(item.relativePath) {
+            collapsedDirectoryPaths.remove(item.relativePath)
+        } else {
+            collapsedDirectoryPaths.insert(item.relativePath)
+        }
     }
 
     func bootstrap() async {
@@ -852,11 +869,26 @@ final class AppViewModel: ObservableObject {
         guard changed else { return }
 
         files = scanned
+        let directoryPaths = Set(scanned.filter(\.isDirectory).map(\.relativePath))
+        collapsedDirectoryPaths = collapsedDirectoryPaths.intersection(directoryPaths)
         lastFileSignature = signature
         refreshMentionState()
 
         guard triggerChangeIndex, hadPreviousSnapshot else { return }
         await autoIndexCurrentProject(fullScan: false, statusText: "New files detected. Re-indexing...")
+    }
+
+    private func hasCollapsedAncestor(_ item: FileItem) -> Bool {
+        let components = item.relativePath.split(separator: "/")
+        guard components.count > 1 else { return false }
+        var prefix = ""
+        for component in components.dropLast() {
+            prefix = prefix.isEmpty ? String(component) : "\(prefix)/\(component)"
+            if collapsedDirectoryPaths.contains(prefix) {
+                return true
+            }
+        }
+        return false
     }
 
     func autoIndexCurrentProject(fullScan: Bool = true, statusText: String = "Auto-indexing project...") async {

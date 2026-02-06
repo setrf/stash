@@ -155,7 +155,6 @@ class CodexExecutor:
             env=env,
             capture_output=True,
             text=True,
-            timeout=600,
             check=False,
         )
         return int(proc.returncode), proc.stdout, proc.stderr
@@ -235,7 +234,6 @@ class CodexExecutor:
             env=env,
             capture_output=True,
             text=True,
-            timeout=600,
             check=False,
         )
 
@@ -347,7 +345,7 @@ class CodexExecutor:
         codex_bin: str,
         codex_model: str | None,
         env: dict[str, str],
-        timeout_seconds: int,
+        timeout_seconds: int | None = None,
     ) -> tuple[list[DirectCommandResult], str]:
         base_cmdline = [
             codex_bin,
@@ -366,17 +364,18 @@ class CodexExecutor:
             cmdline.extend(["-m", codex_model])
         cmdline.append("-")
 
+        proc_kwargs: dict[str, Any] = {
+            "input": prompt,
+            "cwd": str(cwd),
+            "env": env,
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        }
+        if timeout_seconds is not None and timeout_seconds > 0:
+            proc_kwargs["timeout"] = timeout_seconds
         try:
-            proc = subprocess.run(
-                cmdline,
-                input=prompt,
-                cwd=str(cwd),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
-            )
+            proc = subprocess.run(cmdline, **proc_kwargs)
         except subprocess.TimeoutExpired as exc:
             raise CodexCommandError(f"Codex execution timed out after {timeout_seconds} seconds") from exc
 
@@ -468,7 +467,7 @@ class CodexExecutor:
             codex_bin=resolved_codex,
             codex_model=runtime.codex_planner_model,
             env=exec_env,
-            timeout_seconds=max(20, runtime.planner_timeout_seconds),
+            timeout_seconds=None,
         )
         finished_at = utc_now_iso()
         return DirectExecutionResult(
@@ -555,12 +554,6 @@ class CodexExecutor:
                 logger.warning("Codex binary missing; used shell fallback")
             else:
                 raise CodexCommandError("Execution binary not found")
-        except subprocess.TimeoutExpired as exc:
-            exit_code = 124
-            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            stderr = "Command timed out after 600 seconds"
-            logger.error("Command timed out after 600s")
-
         finished_at = utc_now_iso()
         logger.info("Execution finished engine=%s exit_code=%s", engine, exit_code)
         return ExecutionResult(

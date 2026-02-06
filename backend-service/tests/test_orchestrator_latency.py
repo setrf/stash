@@ -64,8 +64,15 @@ class _FakePlanner:
 
 
 class _FakeCodex:
-    def __init__(self, delays_by_command: dict[str, float] | None = None):
+    def __init__(
+        self,
+        delays_by_command: dict[str, float] | None = None,
+        direct_commands: list[DirectCommandResult] | None = None,
+        direct_assistant_text: str = "Direct execution complete.",
+    ):
         self.delays_by_command = delays_by_command or {}
+        self.direct_commands = direct_commands
+        self.direct_assistant_text = direct_assistant_text
         self.starts: dict[str, float] = {}
         self.ends: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -106,8 +113,9 @@ class _FakeCodex:
         _ = (context, user_message, conversation_history, skill_bundle, project_summary)
         return DirectExecutionResult(
             engine="codex-cli",
-            assistant_text="Direct execution complete.",
-            commands=[
+            assistant_text=self.direct_assistant_text,
+            commands=self.direct_commands
+            or [
                 DirectCommandResult(
                     command="cat notes.txt",
                     exit_code=0,
@@ -306,6 +314,38 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         completed_steps = [event for event in events if event["type"] == "run_step_completed"]
         self.assertEqual(len(completed_steps), 2)
         self.assertEqual(str(completed_steps[0]["payload"].get("execution_mode")), "direct_codex")
+
+    async def test_execute_mode_read_only_does_not_emit_output_files(self) -> None:
+        planner = _FakePlanner([])
+        codex = _FakeCodex(
+            direct_commands=[
+                DirectCommandResult(
+                    command="cat notes.txt",
+                    exit_code=0,
+                    output="hello world",
+                    status="completed",
+                    cwd=str(self.context.root_path),
+                )
+            ]
+        )
+        runtime_store = _FakeRuntimeConfigStore(RuntimeConfig(execution_mode="execute"))
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=runtime_store,  # type: ignore[arg-type]
+        )
+
+        run_id = await self._run_orchestrator(orchestrator)
+        run = self.repo.get_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run["status"], "done")
+
+        messages = self.repo.list_messages(self.conversation["id"], cursor=None, limit=200)
+        assistants = [msg for msg in messages if msg.get("role") == "assistant"]
+        self.assertTrue(assistants)
+        self.assertEqual(assistants[-1].get("parts"), [])
 
 
 if __name__ == "__main__":

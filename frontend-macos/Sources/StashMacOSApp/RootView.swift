@@ -203,20 +203,13 @@ private struct FilesPanel: View {
 
             List(viewModel.filteredFiles) { item in
                 let targetDirectory = dropTargetDirectory(for: item)
-                HStack(spacing: 8) {
-                    Image(systemName: item.isDirectory ? "folder.fill" : "doc.text")
-                        .foregroundStyle(item.isDirectory ? CodexTheme.accent : CodexTheme.textSecondary)
-                    Text(item.name)
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(CodexTheme.textPrimary)
-                        .padding(.leading, CGFloat(item.depth) * 8)
-                    Spacer()
-                }
+                fileRow(item: item)
                 .help(item.relativePath)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
                         .fill(rowDropTargetID == item.id ? CodexTheme.accent.opacity(0.16) : Color.clear)
                 )
+                .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
                 .onDrop(
                     of: [UTType.fileURL],
                     isTargeted: Binding(
@@ -262,6 +255,32 @@ private struct FilesPanel: View {
             }
         }
         .padding(14)
+    }
+
+    private func fileRow(item: FileItem) -> some View {
+        HStack(spacing: 8) {
+            if item.isDirectory {
+                Button {
+                    viewModel.toggleDirectoryExpanded(item)
+                } label: {
+                    Image(systemName: viewModel.isDirectoryExpanded(item) ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                        .frame(width: 12, alignment: .center)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Color.clear
+                    .frame(width: 12, height: 12)
+            }
+            Image(systemName: item.isDirectory ? "folder.fill" : "doc.text")
+                .foregroundStyle(item.isDirectory ? CodexTheme.accent : CodexTheme.textSecondary)
+            Text(item.name)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(CodexTheme.textPrimary)
+            Spacer()
+        }
+        .padding(.leading, CGFloat(item.depth) * 14)
     }
 
     private func dropTargetDirectory(for item: FileItem) -> String {
