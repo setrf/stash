@@ -602,6 +602,7 @@ struct WorkspacePanel: View {
             HStack(spacing: 6) {
                 ForEach(viewModel.workspaceTabs) { tab in
                     let isActive = viewModel.activeTabID == tab.id
+                    let hasExternalChange = viewModel.externallyChangedBufferPaths.contains(tab.relativePath)
                     HStack(spacing: 6) {
                         Image(systemName: icon(for: tab.fileKind))
                             .font(.system(size: 10, weight: .medium))
@@ -615,6 +616,12 @@ struct WorkspacePanel: View {
                             Circle()
                                 .fill(CodexTheme.warning)
                                 .frame(width: 7, height: 7)
+                        }
+                        if hasExternalChange {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(CodexTheme.warning)
+                                .help("This file changed on disk")
                         }
 
                         if tab.isPreview, !tab.isPinned {
@@ -659,7 +666,9 @@ struct WorkspacePanel: View {
     }
 
     private func documentHeader(tab: WorkspaceTab) -> some View {
-        HStack(spacing: 10) {
+        let hasExternalChange = viewModel.externallyChangedBufferPaths.contains(tab.relativePath)
+        let isDirty = viewModel.documentBuffers[tab.relativePath]?.isDirty == true
+        return HStack(spacing: 10) {
             Text(tab.relativePath)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(CodexTheme.textSecondary)
@@ -683,6 +692,25 @@ struct WorkspacePanel: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 160)
+            }
+
+            if hasExternalChange {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(CodexTheme.warning)
+                    Text(isDirty ? "Changed on disk while editing" : "Changed on disk")
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(CodexTheme.warning)
+                }
+            }
+
+            if hasExternalChange {
+                Button("Reload") {
+                    viewModel.reloadBufferFromDisk(relativePath: tab.relativePath, force: true)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
 
             Button("Open in macOS") {

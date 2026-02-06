@@ -322,12 +322,26 @@ private struct FilesPanel: View {
 
 private struct ChatPanel: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var runDetailsExpanded = false
+    @State private var hideDoneInline = false
+    @State private var doneRowGeneration = 0
+
+    private var shouldShowInlineRunRow: Bool {
+        switch viewModel.runInlineState {
+        case .idle:
+            return false
+        case .done:
+            return !hideDoneInline
+        case .running, .awaitingConfirmation, .failed:
+            return true
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("Chat")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(CodexTheme.textPrimary)
 
                 Spacer()
@@ -345,23 +359,23 @@ private struct ChatPanel: View {
                 } label: {
                     HStack(spacing: 6) {
                         Text(viewModel.selectedConversation?.title ?? "Conversation")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .font(.system(size: 12, weight: .semibold))
                         Image(systemName: "chevron.down")
                             .font(.system(size: 10, weight: .semibold))
                     }
                     .foregroundStyle(CodexTheme.textPrimary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white))
+                    .background(RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius).fill(Color.white))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(CodexTheme.border, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                            .stroke(CodexTheme.borderSoft, lineWidth: CodexTheme.chatBorderLineWidth)
                     )
                 }
                 .menuStyle(.borderlessButton)
             }
             .padding(.horizontal, 18)
-            .padding(.vertical, 12)
+            .padding(.vertical, 10)
             .background(CodexTheme.panel)
 
             Divider()
@@ -369,10 +383,10 @@ private struct ChatPanel: View {
             if viewModel.visibleMessages.isEmpty {
                 VStack(spacing: 10) {
                     Text("Ask Stash to work on your files")
-                        .font(.system(size: 19, weight: .semibold, design: .rounded))
+                        .font(.system(size: 19, weight: .semibold))
                         .foregroundStyle(CodexTheme.textPrimary)
                     Text("Type what you want done and run it.")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(CodexTheme.textSecondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -380,26 +394,23 @@ private struct ChatPanel: View {
                 MessageTimeline(
                     messages: viewModel.visibleMessages,
                     onOpenTaggedFile: { path in
-                        viewModel.openTaggedOutputPathInOS(path)
+                        viewModel.openTaggedOutputPathInPreview(path)
                     }
                 )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            if viewModel.runInProgress ||
-                viewModel.runThinkingText != nil ||
-                viewModel.runPlanningText != nil ||
-                viewModel.runPlannerPreview != nil ||
-                !viewModel.runTodos.isEmpty ||
-                !viewModel.runFeedbackEvents.isEmpty
-            {
-                RunFeedbackCard(viewModel: viewModel)
+            if shouldShowInlineRunRow {
+                RunInlineStatusRow(
+                    viewModel: viewModel,
+                    detailsExpanded: $runDetailsExpanded
+                )
                     .padding(.horizontal, 18)
                     .padding(.bottom, 8)
             }
 
-            if viewModel.hasPendingRunConfirmation {
-                PendingRunChangesCard(viewModel: viewModel)
+            if runDetailsExpanded, viewModel.hasRunDetails {
+                RunDetailsDrawer(viewModel: viewModel)
                     .padding(.horizontal, 18)
                     .padding(.bottom, 8)
             }
@@ -408,11 +419,12 @@ private struct ChatPanel: View {
                 SetupRequiredCard(viewModel: viewModel)
                     .padding(.horizontal, 18)
                     .padding(.bottom, 8)
+                    .opacity(0.92)
             }
 
             if let errorText = viewModel.errorText {
                 Text(errorText)
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(CodexTheme.danger)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 18)
@@ -431,21 +443,24 @@ private struct ChatPanel: View {
                 }
 
                 TextEditor(text: $viewModel.composerText)
-                    .font(.system(size: 13, weight: .regular, design: .rounded))
+                    .font(CodexTheme.chatBodyFont)
                     .frame(minHeight: 96, maxHeight: 140)
                     .padding(6)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(CodexTheme.border, lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: CodexTheme.chatComposerRadius).fill(Color.white))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: CodexTheme.chatComposerRadius)
+                            .stroke(CodexTheme.borderSoft, lineWidth: CodexTheme.chatBorderLineWidth)
+                    )
                     .onChange(of: viewModel.composerText) {
                         viewModel.composerDidChange()
                     }
 
                 HStack {
                     Text(viewModel.runInProgress ? "Running..." : "Ready")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary)
                     Text("⌘↩ Send")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(CodexTheme.textSecondary)
                     Spacer()
                     Button("Send") {
@@ -458,168 +473,195 @@ private struct ChatPanel: View {
                 }
             }
             .padding(18)
-            .background(CodexTheme.panel)
+            .background(CodexTheme.panelSubtle)
+        }
+        .onChange(of: viewModel.runInlineState) {
+            if viewModel.runInlineState == .done {
+                hideDoneInline = false
+                doneRowGeneration += 1
+                let generation = doneRowGeneration
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_800_000_000)
+                    await MainActor.run {
+                        if generation == doneRowGeneration, viewModel.runInlineState == .done {
+                            hideDoneInline = true
+                        }
+                    }
+                }
+            } else {
+                hideDoneInline = false
+            }
+
+            if viewModel.runInlineState == .idle {
+                runDetailsExpanded = false
+            }
         }
     }
 }
 
-private struct RunFeedbackCard: View {
+private struct RunInlineStatusRow: View {
     @ObservedObject var viewModel: AppViewModel
-    @State private var reasoningExpanded = true
-    @State private var todosExpanded = true
-    @State private var feedExpanded = true
+    @Binding var detailsExpanded: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Agent Run")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
-                Spacer()
-                if let runStatusText = viewModel.runStatusText {
-                    Text(runStatusText)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(CodexTheme.textSecondary)
+        HStack(spacing: 8) {
+            leadingStateIndicator
+
+            Text(viewModel.runInlineSummaryText)
+                .font(CodexTheme.chatStatusFont)
+                .foregroundStyle(summaryColor)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if viewModel.runInlineState == .awaitingConfirmation {
+                Button("Discard") {
+                    Task { await viewModel.discardPendingRunChanges() }
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("Accept Changes") {
+                    Task { await viewModel.applyPendingRunChanges() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
 
-            if viewModel.runThinkingText != nil || viewModel.runPlanningText != nil || viewModel.runPlannerPreview != nil {
-                DisclosureGroup(isExpanded: $reasoningExpanded) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if let runThinkingText = viewModel.runThinkingText {
-                            HStack(spacing: 8) {
-                                if viewModel.runInProgress {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                        .tint(CodexTheme.accent)
-                                }
-                                Text(runThinkingText)
-                                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                                    .foregroundStyle(CodexTheme.textPrimary)
-                            }
-                        }
+            if viewModel.hasRunDetails {
+                Button(detailsExpanded ? "Hide Details" : "Details") {
+                    detailsExpanded.toggle()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                .stroke(CodexTheme.borderSoft, lineWidth: CodexTheme.chatBorderLineWidth)
+        )
+    }
 
-                        if let runPlanningText = viewModel.runPlanningText {
-                            Text(runPlanningText)
-                                .font(.system(size: 12, weight: .medium, design: .rounded))
-                                .foregroundStyle(CodexTheme.textSecondary)
-                        }
+    @ViewBuilder
+    private var leadingStateIndicator: some View {
+        switch viewModel.runInlineState {
+        case .running:
+            if viewModel.runInProgress {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(CodexTheme.accent)
+            } else {
+                Image(systemName: "waveform.path")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(CodexTheme.accent)
+            }
+        case .awaitingConfirmation:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(CodexTheme.warning)
+        case .failed:
+            Image(systemName: "xmark.octagon.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(CodexTheme.danger)
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(CodexTheme.success)
+        case .idle:
+            Image(systemName: "circle")
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(CodexTheme.textSecondary)
+        }
+    }
 
-                        if let preview = viewModel.runPlannerPreview, !preview.isEmpty {
-                            ScrollView {
-                                Text(preview)
-                                    .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                    .foregroundStyle(CodexTheme.textPrimary)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(8)
-                            }
-                            .frame(maxHeight: 160)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(CodexTheme.canvas.opacity(0.8))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(CodexTheme.border.opacity(0.8), lineWidth: 1)
-                            )
-                        }
+    private var summaryColor: Color {
+        switch viewModel.runInlineState {
+        case .failed:
+            return CodexTheme.danger
+        case .awaitingConfirmation:
+            return CodexTheme.warning
+        case .running:
+            return CodexTheme.textPrimary
+        case .done, .idle:
+            return CodexTheme.textSecondary
+        }
+    }
+}
+
+private struct RunDetailsDrawer: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let preview = viewModel.runPlannerPreview, !preview.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Plan")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                    ScrollView {
+                        Text(preview)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundStyle(CodexTheme.textPrimary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(.top, 6)
-                } label: {
-                    sectionHeader(title: "Thinking & Planning", count: nil)
+                    .frame(maxHeight: 120)
                 }
             }
 
             if !viewModel.runTodos.isEmpty {
-                DisclosureGroup(isExpanded: $todosExpanded) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(viewModel.runTodos) { todo in
-                            HStack(alignment: .top, spacing: 6) {
-                                Image(systemName: todoIcon(for: todo.status))
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(todoColor(for: todo.status))
-                                Text(todo.title)
-                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                    .foregroundStyle(CodexTheme.textPrimary)
-                                    .lineLimit(2)
-                                    .strikethrough(todo.status.lowercased() == "completed", color: CodexTheme.textSecondary)
-                            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Steps")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                    ForEach(viewModel.runTodos.prefix(8)) { todo in
+                        HStack(spacing: 6) {
+                            Image(systemName: todoIcon(for: todo.status))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(todoColor(for: todo.status))
+                            Text(todo.title)
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                .foregroundStyle(CodexTheme.textPrimary)
+                                .lineLimit(1)
                         }
                     }
-                    .padding(.top, 6)
-                } label: {
-                    sectionHeader(title: "Todos", count: viewModel.runTodos.count)
                 }
             }
 
             if !viewModel.runFeedbackEvents.isEmpty {
-                DisclosureGroup(isExpanded: $feedExpanded) {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 6) {
-                            ForEach(viewModel.runFeedbackEvents) { event in
-                                HStack(alignment: .top, spacing: 8) {
-                                    Image(systemName: eventIcon(for: event.type))
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(eventColor(for: event.type))
-                                        .padding(.top, 1)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        HStack(spacing: 6) {
-                                            Text(event.timestamp)
-                                                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                                .foregroundStyle(CodexTheme.textSecondary)
-                                            Text(event.title)
-                                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                                .foregroundStyle(CodexTheme.textPrimary)
-                                        }
-                                        if let detail = event.detail, !detail.isEmpty {
-                                            Text(detail)
-                                                .font(.system(size: 11, weight: .regular, design: .rounded))
-                                                .foregroundStyle(CodexTheme.textSecondary)
-                                                .textSelection(.enabled)
-                                        }
-                                    }
-                                }
-                            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Events")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                    ForEach(viewModel.runFeedbackEvents.suffix(8)) { event in
+                        HStack(spacing: 6) {
+                            Text(event.timestamp)
+                                .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                .foregroundStyle(CodexTheme.textSecondary)
+                            Text(event.title)
+                                .font(.system(size: 11, weight: .regular))
+                                .foregroundStyle(CodexTheme.textPrimary)
+                                .lineLimit(1)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: 170)
-                    .padding(.top, 6)
-                } label: {
-                    sectionHeader(title: "Live Feed", count: viewModel.runFeedbackEvents.count)
                 }
             }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
                 .fill(Color.white)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+            RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                .stroke(CodexTheme.borderSoft, lineWidth: CodexTheme.chatBorderLineWidth)
         )
-    }
-
-    private func sectionHeader(title: String, count: Int?) -> some View {
-        HStack(spacing: 6) {
-            Text(title)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundStyle(CodexTheme.textSecondary)
-            if let count {
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(CodexTheme.textSecondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule()
-                            .fill(CodexTheme.canvas)
-                    )
-            }
-        }
     }
 
     private func todoIcon(for status: String) -> String {
@@ -646,134 +688,6 @@ private struct RunFeedbackCard: View {
         default:
             return CodexTheme.textSecondary
         }
-    }
-
-    private func eventIcon(for type: String) -> String {
-        switch type.lowercased() {
-        case "planning":
-            return "brain.head.profile"
-        case "execution":
-            return "terminal"
-        case "error":
-            return "xmark.octagon.fill"
-        default:
-            return "waveform.path.ecg"
-        }
-    }
-
-    private func eventColor(for type: String) -> Color {
-        switch type.lowercased() {
-        case "planning":
-            return CodexTheme.accent
-        case "execution":
-            return CodexTheme.textPrimary
-        case "error":
-            return CodexTheme.danger
-        default:
-            return CodexTheme.textSecondary
-        }
-    }
-}
-
-private struct PendingRunChangesCard: View {
-    @ObservedObject var viewModel: AppViewModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Pending Changes")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(CodexTheme.textSecondary)
-                Spacer()
-                if let outcome = viewModel.pendingRunOutcomeKind, !outcome.isEmpty {
-                    Text(outcome.replacingOccurrences(of: "_", with: " "))
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(viewModel.pendingRunChanges.prefix(8))) { change in
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: icon(for: change.type))
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(color(for: change.type))
-                            .padding(.top, 1)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(label(for: change))
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .foregroundStyle(CodexTheme.textPrimary)
-                            if let summary = change.summary, !summary.isEmpty {
-                                Text(summary)
-                                    .font(.system(size: 11, weight: .regular, design: .rounded))
-                                    .foregroundStyle(CodexTheme.textSecondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                    }
-                }
-            }
-
-            HStack(spacing: 8) {
-                Button("Discard") {
-                    Task { await viewModel.discardPendingRunChanges() }
-                }
-                .buttonStyle(.bordered)
-
-                Button("Apply") {
-                    Task { await viewModel.applyPendingRunChanges() }
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
-        )
-    }
-
-    private func icon(for type: String) -> String {
-        switch type.lowercased() {
-        case "edit_file":
-            return "pencil"
-        case "output_file":
-            return "doc.badge.plus"
-        case "delete_file":
-            return "trash"
-        case "rename_file":
-            return "arrow.left.arrow.right"
-        default:
-            return "doc"
-        }
-    }
-
-    private func color(for type: String) -> Color {
-        switch type.lowercased() {
-        case "delete_file":
-            return CodexTheme.danger
-        case "output_file":
-            return CodexTheme.accent
-        default:
-            return CodexTheme.textSecondary
-        }
-    }
-
-    private func label(for change: MessagePart) -> String {
-        switch change.type.lowercased() {
-        case "rename_file":
-            if let fromPath = change.fromPath, let path = change.path {
-                return "\(fromPath) -> \(path)"
-            }
-        default:
-            break
-        }
-        return change.path ?? change.fromPath ?? change.type
     }
 }
 
@@ -1070,13 +984,15 @@ private struct MessageTimeline: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: CodexTheme.chatRowSpacing) {
                     ForEach(messages) { message in
                         MessageRow(message: message, onOpenTaggedFile: onOpenTaggedFile)
                             .id(message.id)
                     }
                 }
-                .padding(18)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .onChange(of: messages.count) {
                 if let last = messages.last {
@@ -1092,277 +1008,139 @@ private struct MessageTimeline: View {
 private struct MessageRow: View {
     let message: Message
     let onOpenTaggedFile: (String) -> Void
+    @State private var showMeta = false
 
     private var isUser: Bool {
         message.role.lowercased() == "user"
     }
 
-    private var roleLabel: String {
-        isUser ? "YOU" : "STASH"
-    }
-
     private var renderedContent: String {
-        let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isUser else { return content }
-
-        let noFileTags = stripStashFileTags(from: content)
-        let sanitized = stripCodexCommandBlocks(from: noFileTags)
-        if !sanitized.isEmpty {
-            if let summaryRange = sanitized.range(of: "Execution summary:") {
-                let beforeSummary = String(sanitized[..<summaryRange.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !beforeSummary.isEmpty {
-                    return sanitized
-                }
-                let summary = String(sanitized[summaryRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !summary.isEmpty {
-                    return summary
-                }
-            }
-            return sanitized
+        if isUser {
+            return message.content.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return content
-    }
-
-    private var taggedOutputFiles: [String] {
-        guard !isUser else { return [] }
-        return extractStashFileTags(from: message.content)
-    }
-
-    private var structuredOutputFiles: [String] {
-        guard !isUser else { return [] }
-        var ordered: [String] = []
-        var seen = Set<String>()
-        for part in message.parts where part.type.lowercased() == "output_file" {
-            guard let path = part.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { continue }
-            let lowered = path.lowercased()
-            if seen.contains(lowered) { continue }
-            seen.insert(lowered)
-            ordered.append(path)
-        }
-        return ordered
-    }
-
-    private var changedFileParts: [MessagePart] {
-        guard !isUser else { return [] }
-        return message.parts.filter { part in
-            let type = part.type.lowercased()
-            return type == "edit_file" || type == "delete_file" || type == "rename_file"
-        }
-    }
-
-    private var allOutputFiles: [String] {
-        var ordered: [String] = []
-        var seen = Set<String>()
-        for path in structuredOutputFiles + taggedOutputFiles {
-            let lowered = path.lowercased()
-            if seen.contains(lowered) { continue }
-            seen.insert(lowered)
-            ordered.append(path)
-        }
-        return ordered
+        return message.renderedAssistantContent
     }
 
     var body: some View {
-        HStack {
-            if isUser { Spacer(minLength: 60) }
+        HStack(alignment: .top, spacing: 0) {
+            if isUser { Spacer(minLength: 44) }
 
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text(roleLabel)
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                    Text(message.createdAt)
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .foregroundStyle(CodexTheme.textSecondary)
+                if showMeta || isUser {
+                    HStack(spacing: 6) {
+                        Text(isUser ? "You" : "Stash")
+                            .font(CodexTheme.chatMetaFont)
+                            .foregroundStyle(isUser ? CodexTheme.accent : CodexTheme.textSecondary)
+                        Text("•")
+                            .font(CodexTheme.chatMetaFont)
+                            .foregroundStyle(CodexTheme.textSecondary.opacity(0.65))
+                        Text(message.displayRelativeTimestamp ?? message.displayTimestamp)
+                            .font(CodexTheme.chatMetaFont)
+                            .foregroundStyle(CodexTheme.textSecondary)
+                    }
                 }
 
-                Text(renderedContent)
-                    .font(.system(size: 13, weight: .regular, design: .rounded))
-                    .foregroundStyle(CodexTheme.textPrimary)
-                    .textSelection(.enabled)
+                if !renderedContent.isEmpty {
+                    Text(renderedContent)
+                        .font(CodexTheme.chatBodyFont)
+                        .foregroundStyle(CodexTheme.textPrimary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if !message.artifactChips.isEmpty {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 6)], spacing: 6) {
+                        ForEach(message.artifactChips) { chip in
+                            if chip.isOpenAction, let path = chip.path {
+                                Button {
+                                    onOpenTaggedFile(path)
+                                } label: {
+                                    chipLabel(chip, showOpenCallout: true)
+                                }
+                                .buttonStyle(.plain)
+                            } else {
+                                chipLabel(chip, showOpenCallout: false)
+                            }
+                        }
+                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
-
-                if !changedFileParts.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Changed Files")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(CodexTheme.textSecondary)
-                        ForEach(changedFileParts) { change in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: icon(for: change.type))
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(color(for: change.type))
-                                    Text(changeLabel(change))
-                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                        .foregroundStyle(CodexTheme.textPrimary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                }
-                                if let summary = change.summary, !summary.isEmpty {
-                                    Text(summary)
-                                        .font(.system(size: 11, weight: .regular, design: .rounded))
-                                        .foregroundStyle(CodexTheme.textSecondary)
-                                        .lineLimit(2)
-                                }
-                                if let diff = change.diff, !diff.isEmpty {
-                                    Text(diff)
-                                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                        .foregroundStyle(CodexTheme.textSecondary)
-                                        .lineLimit(5)
-                                }
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(CodexTheme.canvas.opacity(0.95))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
-                            )
-                        }
-                    }
-                    .padding(.top, 2)
-                }
-
-                if !allOutputFiles.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Output Files")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(CodexTheme.textSecondary)
-                        ForEach(allOutputFiles, id: \.self) { path in
-                            Button {
-                                onOpenTaggedFile(path)
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "doc.text")
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(CodexTheme.accent)
-                                    Text(path)
-                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                                        .foregroundStyle(CodexTheme.textPrimary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Text("Open")
-                                        .font(.system(size: 10, weight: .semibold, design: .rounded))
-                                        .foregroundStyle(CodexTheme.accent)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(CodexTheme.canvas.opacity(0.95))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.top, 2)
                 }
             }
-            .padding(12)
+            .padding(.horizontal, isUser ? 10 : 0)
+            .padding(.vertical, isUser ? 8 : 2)
             .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isUser ? CodexTheme.userBubble : CodexTheme.assistantBubble)
+                Group {
+                    if isUser {
+                        RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                            .fill(CodexTheme.accent.opacity(0.09))
+                    } else {
+                        Color.clear
+                    }
+                }
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(CodexTheme.border.opacity(0.7), lineWidth: 1)
+                Group {
+                    if isUser {
+                        RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                            .stroke(CodexTheme.accent.opacity(0.25), lineWidth: CodexTheme.chatBorderLineWidth)
+                    } else {
+                        Color.clear
+                    }
+                }
             )
-            .frame(maxWidth: 780, alignment: .leading)
+            .frame(maxWidth: isUser ? CodexTheme.chatMaxColumnWidth * 0.86 : CodexTheme.chatMaxColumnWidth, alignment: .leading)
 
-            if !isUser { Spacer(minLength: 60) }
+            if !isUser { Spacer(minLength: 44) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                showMeta = hovering
+            }
         }
     }
 
-    private func icon(for type: String) -> String {
-        switch type.lowercased() {
-        case "edit_file":
-            return "pencil"
-        case "delete_file":
-            return "trash"
-        case "rename_file":
-            return "arrow.left.arrow.right"
-        default:
-            return "doc"
+    private func chipLabel(_ chip: MessageArtifactChip, showOpenCallout: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: chip.kind.iconName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(chipTint(chip.kind))
+            Text(chip.label)
+                .font(CodexTheme.chatChipFont)
+                .foregroundStyle(CodexTheme.textPrimary)
+                .lineLimit(1)
+            if showOpenCallout {
+                Spacer(minLength: 4)
+                Text("Open")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(CodexTheme.accent)
+                    .lineLimit(1)
+            }
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                .stroke(CodexTheme.borderSoft, lineWidth: CodexTheme.chatBorderLineWidth)
+        )
+        .help(chip.summary ?? chip.label)
     }
 
-    private func color(for type: String) -> Color {
-        switch type.lowercased() {
-        case "delete_file":
-            return CodexTheme.danger
-        case "edit_file":
+    private func chipTint(_ kind: MessageArtifactChipKind) -> Color {
+        switch kind {
+        case .output:
             return CodexTheme.accent
-        default:
+        case .delete:
+            return CodexTheme.danger
+        case .edit:
+            return CodexTheme.textPrimary
+        case .rename:
             return CodexTheme.textSecondary
         }
-    }
-
-    private func changeLabel(_ change: MessagePart) -> String {
-        if change.type.lowercased() == "rename_file",
-           let fromPath = change.fromPath,
-           let path = change.path
-        {
-            return "\(fromPath) -> \(path)"
-        }
-        return change.path ?? change.fromPath ?? change.type
-    }
-
-    private func stripCodexCommandBlocks(from text: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: "<codex_cmd(?:\\s+[^>]*)?>[\\s\\S]*?<\\/codex_cmd>",
-            options: [.caseInsensitive]
-        ) else {
-            return text
-        }
-        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
-        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
-        return stripped
-            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func extractStashFileTags(from text: String) -> [String] {
-        guard let regex = try? NSRegularExpression(
-            pattern: "<stash_file>\\s*([^<]+?)\\s*<\\/stash_file>",
-            options: [.caseInsensitive]
-        ) else {
-            return []
-        }
-        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
-        let matches = regex.matches(in: text, options: [], range: nsRange)
-        var paths: [String] = []
-        var seen = Set<String>()
-        for match in matches where match.numberOfRanges > 1 {
-            guard let range = Range(match.range(at: 1), in: text) else { continue }
-            let value = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let lowered = value.lowercased()
-            if value.isEmpty || seen.contains(lowered) { continue }
-            seen.insert(lowered)
-            paths.append(value)
-        }
-        return paths
-    }
-
-    private func stripStashFileTags(from text: String) -> String {
-        guard let regex = try? NSRegularExpression(
-            pattern: "(?im)^\\s*[-*]?\\s*<stash_file>\\s*[^<]+?\\s*<\\/stash_file>\\s*$",
-            options: [.caseInsensitive]
-        ) else {
-            return text
-        }
-        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
-        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
-        return stripped
-            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

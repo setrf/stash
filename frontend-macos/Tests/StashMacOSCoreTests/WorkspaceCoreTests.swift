@@ -158,10 +158,93 @@ final class WorkspaceCoreTests: XCTestCase {
         XCTAssertTrue(viewModel.documentBuffers[csvPath]?.content.contains("2026-01-02,22.00") == true)
     }
 
+    @MainActor
+    func testRunInlineStateMapping() {
+        let viewModel = AppViewModel()
+        XCTAssertEqual(viewModel.runInlineState, .idle)
+
+        viewModel.runInProgress = true
+        XCTAssertEqual(viewModel.runInlineState, .running)
+        viewModel.runInProgress = false
+
+        viewModel.pendingRunConfirmationID = "run-123"
+        XCTAssertEqual(viewModel.runInlineState, .awaitingConfirmation)
+        viewModel.pendingRunConfirmationID = nil
+
+        viewModel.runStatusText = "FAILED: step 2"
+        XCTAssertEqual(viewModel.runInlineState, .failed)
+        viewModel.runStatusText = nil
+
+        viewModel.runFeedbackEvents = [
+            RunFeedbackEvent(id: "event-1", type: "status", title: "Run completed", detail: nil, timestamp: "12:00:00")
+        ]
+        XCTAssertEqual(viewModel.runInlineState, .done)
+    }
+
+    @MainActor
+    func testPendingConfirmationVisibleWithoutChangesList() {
+        let viewModel = AppViewModel()
+        viewModel.pendingRunConfirmationID = "run-awaiting"
+        viewModel.pendingRunChanges = []
+
+        XCTAssertTrue(viewModel.hasPendingRunConfirmation)
+        XCTAssertEqual(viewModel.runInlineState, .awaitingConfirmation)
+        XCTAssertTrue(viewModel.runInlineSummaryText.contains("Review pending changes"))
+    }
+
+    func testMessageTimestampFormatting() {
+        let message = Message(
+            id: "m1",
+            projectId: "p1",
+            conversationId: "c1",
+            role: "assistant",
+            content: "Done.",
+            parts: [],
+            parentMessageId: nil,
+            sequenceNo: 1,
+            createdAt: "2026-02-06T10:16:14+00:00"
+        )
+
+        XCTAssertFalse(message.displayTimestamp.contains("T"))
+        XCTAssertFalse(message.compactMetadataLabel.contains("T10:16:14"))
+    }
+
+    func testArtifactChipExtractionDedupAndOrder() throws {
+        let partsJSON = """
+        [
+          {"type":"edit_file","path":"README.md","summary":"Appended heading"},
+          {"type":"rename_file","fromPath":"notes-old.md","path":"notes.md","summary":"rename"},
+          {"type":"output_file","path":"report.md"},
+          {"type":"output_file","path":"report.md"}
+        ]
+        """
+        let message = Message(
+            id: "m2",
+            projectId: "p1",
+            conversationId: "c1",
+            role: "assistant",
+            content: "<stash_file>report.md</stash_file>\n<stash_file>report_extra.md</stash_file>",
+            parts: try decodeMessageParts(from: partsJSON),
+            parentMessageId: nil,
+            sequenceNo: 2,
+            createdAt: "2026-02-06T10:20:00+00:00"
+        )
+
+        let chips = message.artifactChips
+        XCTAssertEqual(chips.map(\.kind), [.edit, .rename, .output, .output])
+        XCTAssertEqual(chips.map(\.label), ["README.md", "notes-old.md -> notes.md", "report.md", "report_extra.md"])
+        XCTAssertEqual(chips.filter(\.isOpenAction).count, 2)
+    }
+
     private func makeTempProject() throws -> URL {
         let base = FileManager.default.temporaryDirectory
         let url = base.appendingPathComponent("stash-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func decodeMessageParts(from json: String) throws -> [MessagePart] {
+        let data = Data(json.utf8)
+        return try JSONDecoder().decode([MessagePart].self, from: data)
     }
 }

@@ -127,6 +127,220 @@ struct Message: Decodable, Identifiable, Hashable {
     }
 }
 
+enum MessageArtifactChipKind: String, Hashable {
+    case output
+    case edit
+    case delete
+    case rename
+
+    var iconName: String {
+        switch self {
+        case .output:
+            return "doc"
+        case .edit:
+            return "pencil"
+        case .delete:
+            return "trash"
+        case .rename:
+            return "arrow.left.arrow.right"
+        }
+    }
+}
+
+struct MessageArtifactChip: Identifiable, Hashable {
+    let kind: MessageArtifactChipKind
+    let label: String
+    let path: String?
+    let summary: String?
+
+    var id: String {
+        "\(kind.rawValue):\((path ?? label).lowercased())"
+    }
+
+    var isOpenAction: Bool {
+        kind == .output && path != nil
+    }
+}
+
+private enum MessageTimestampFormatter {
+    static let sourceWithFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    static let sourceDefault = ISO8601DateFormatter()
+
+    static let shortTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
+    static func display(from rawISOText: String) -> String {
+        let trimmed = rawISOText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return rawISOText }
+        if let parsed = sourceWithFractional.date(from: trimmed) ?? sourceDefault.date(from: trimmed) {
+            return shortTime.string(from: parsed)
+        }
+        return rawISOText
+    }
+
+    static func relative(from rawISOText: String) -> String? {
+        let trimmed = rawISOText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = sourceWithFractional.date(from: trimmed) ?? sourceDefault.date(from: trimmed) else {
+            return nil
+        }
+        return relativeFormatter.localizedString(for: parsed, relativeTo: Date())
+    }
+}
+
+extension Message {
+    var displayTimestamp: String {
+        MessageTimestampFormatter.display(from: createdAt)
+    }
+
+    var displayRelativeTimestamp: String? {
+        MessageTimestampFormatter.relative(from: createdAt)
+    }
+
+    var compactMetadataLabel: String {
+        let roleLabel = role.lowercased() == "user" ? "You" : "Stash"
+        if let relative = displayRelativeTimestamp, !relative.isEmpty {
+            return "\(roleLabel) • \(relative)"
+        }
+        return "\(roleLabel) • \(displayTimestamp)"
+    }
+
+    var renderedAssistantContent: String {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard role.lowercased() != "user" else {
+            return trimmed
+        }
+
+        let noFileTags = MessageContentSanitizer.stripStashFileTags(from: trimmed)
+        let sanitized = MessageContentSanitizer.stripCodexCommandBlocks(from: noFileTags)
+        guard !sanitized.isEmpty else { return trimmed }
+
+        if let summaryRange = sanitized.range(of: "Execution summary:") {
+            let beforeSummary = String(sanitized[..<summaryRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !beforeSummary.isEmpty {
+                return sanitized
+            }
+            let summary = String(sanitized[summaryRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !summary.isEmpty {
+                return summary
+            }
+        }
+        return sanitized
+    }
+
+    var artifactChips: [MessageArtifactChip] {
+        guard role.lowercased() != "user" else {
+            return []
+        }
+
+        var ordered: [MessageArtifactChip] = []
+        var seen = Set<String>()
+
+        func appendChip(_ chip: MessageArtifactChip) {
+            let key = chip.id.lowercased()
+            if seen.contains(key) {
+                return
+            }
+            seen.insert(key)
+            ordered.append(chip)
+        }
+
+        for part in parts {
+            let type = part.type.lowercased()
+            switch type {
+            case "edit_file":
+                guard let path = part.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { continue }
+                appendChip(MessageArtifactChip(kind: .edit, label: path, path: path, summary: part.summary))
+            case "delete_file":
+                guard let path = part.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { continue }
+                appendChip(MessageArtifactChip(kind: .delete, label: path, path: path, summary: part.summary))
+            case "rename_file":
+                let from = part.fromPath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let to = part.path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let label = !from.isEmpty && !to.isEmpty ? "\(from) -> \(to)" : (to.isEmpty ? from : to)
+                guard !label.isEmpty else { continue }
+                appendChip(MessageArtifactChip(kind: .rename, label: label, path: to.isEmpty ? nil : to, summary: part.summary))
+            case "output_file":
+                guard let path = part.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { continue }
+                appendChip(MessageArtifactChip(kind: .output, label: path, path: path, summary: part.summary))
+            default:
+                continue
+            }
+        }
+
+        for path in MessageContentSanitizer.extractStashFileTags(from: content) {
+            appendChip(MessageArtifactChip(kind: .output, label: path, path: path, summary: nil))
+        }
+        return ordered
+    }
+}
+
+private enum MessageContentSanitizer {
+    static func stripCodexCommandBlocks(from text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<codex_cmd(?:\\s+[^>]*)?>[\\s\\S]*?<\\/codex_cmd>",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func extractStashFileTags(from text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "<stash_file>\\s*([^<]+?)\\s*<\\/stash_file>",
+            options: [.caseInsensitive]
+        ) else {
+            return []
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let matches = regex.matches(in: text, options: [], range: nsRange)
+        var paths: [String] = []
+        var seen = Set<String>()
+        for match in matches where match.numberOfRanges > 1 {
+            guard let range = Range(match.range(at: 1), in: text) else { continue }
+            let value = String(text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowered = value.lowercased()
+            if value.isEmpty || seen.contains(lowered) { continue }
+            seen.insert(lowered)
+            paths.append(value)
+        }
+        return paths
+    }
+
+    static func stripStashFileTags(from text: String) -> String {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?im)^\\s*[-*]?\\s*<stash_file>\\s*[^<]+?\\s*<\\/stash_file>\\s*$",
+            options: [.caseInsensitive]
+        ) else {
+            return text
+        }
+        let nsRange = NSRange(text.startIndex ..< text.endIndex, in: text)
+        let stripped = regex.stringByReplacingMatches(in: text, options: [], range: nsRange, withTemplate: "")
+        return stripped
+            .replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 enum JSONValue: Decodable, Hashable {
     case string(String)
     case number(Double)

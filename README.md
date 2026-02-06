@@ -78,13 +78,14 @@ This does a single local setup for the stack:
 ## Install Desktop App From Scratch (macOS)
 
 Use this when you want a local `.app` bundle (menu bar overlay + workspace window) instead of running backend/frontend in separate terminals.
+This is the recommended local setup.
 
 Prerequisites:
 - macOS 14+
 - Xcode Command Line Tools (`xcode-select --install`)
 - `python3` and `swift` available in `PATH`
 
-From repo root:
+Clean install (from repo root):
 
 ```bash
 ./scripts/desktop/install_desktop_app.sh
@@ -102,6 +103,14 @@ Launch the app:
 open "$HOME/Desktop/Stash Local.app"
 ```
 
+Verify backend/frontend logs while running:
+
+```bash
+tail -f "$HOME/Library/Logs/StashLocal/backend.log"
+tail -f "$HOME/Library/Logs/StashLocal/frontend.log"
+tail -f "$HOME/Library/Logs/StashLocal/overlay.log"
+```
+
 Optional installer overrides:
 
 ```bash
@@ -116,6 +125,8 @@ Reinstall after updates:
 
 ```bash
 ./scripts/desktop/install_desktop_app.sh
+pkill -f "Stash Local.app/Contents/MacOS/Stash Local" || true
+open "$HOME/Desktop/Stash Local.app"
 ```
 
 Useful logs:

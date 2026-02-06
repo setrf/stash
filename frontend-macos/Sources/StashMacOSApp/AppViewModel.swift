@@ -4,6 +4,14 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    enum RunInlineState: String, Hashable {
+        case idle
+        case running
+        case awaitingConfirmation
+        case failed
+        case done
+    }
+
     struct FolderBreadcrumb: Identifiable, Hashable {
         let id: String
         let title: String
@@ -63,8 +71,10 @@ final class AppViewModel: ObservableObject {
     @Published var runTodos: [RunTodo] = []
     @Published var runFeedbackEvents: [RunFeedbackEvent] = []
     @Published var pendingRunConfirmationID: String?
+    @Published var pendingRunRequiresConfirmation = false
     @Published var pendingRunOutcomeKind: String?
     @Published var pendingRunChanges: [MessagePart] = []
+    @Published var externallyChangedBufferPaths: Set<String> = []
     @Published var mentionSuggestions: [FileItem] = []
     @Published var mentionedFilePaths: [String] = []
     @Published var setupStatus: RuntimeSetupStatus?
@@ -130,7 +140,58 @@ final class AppViewModel: ObservableObject {
     ]
 
     var hasPendingRunConfirmation: Bool {
-        pendingRunConfirmationID != nil && !pendingRunChanges.isEmpty
+        pendingRunConfirmationID != nil
+    }
+
+    var pendingChangeCount: Int {
+        pendingRunChanges.count
+    }
+
+    var runInlineState: RunInlineState {
+        if hasPendingRunConfirmation || pendingRunRequiresConfirmation {
+            return .awaitingConfirmation
+        }
+
+        let statusText = (runStatusText ?? "").lowercased()
+        let planningText = (runPlanningText ?? "").lowercased()
+        let thinkingText = (runThinkingText ?? "").lowercased()
+        let hasActiveThinking = runThinkingText != nil || runPlanningText != nil
+
+        if statusText.contains("fail") || planningText.contains("fail") || thinkingText.contains("fail") {
+            return .failed
+        }
+
+        if runInProgress || statusText.contains("running") || hasActiveThinking {
+            return .running
+        }
+
+        if !runFeedbackEvents.isEmpty || runStatusText != nil || runPlanningText != nil {
+            return .done
+        }
+
+        return .idle
+    }
+
+    var runInlineSummaryText: String {
+        switch runInlineState {
+        case .awaitingConfirmation:
+            if pendingChangeCount > 0 {
+                return "Review \(pendingChangeCount) pending change(s) before applying."
+            }
+            return "Review pending changes before applying."
+        case .running:
+            return runThinkingText ?? runPlanningText ?? runStatusText ?? "Working on your request..."
+        case .failed:
+            return runStatusText ?? runPlanningText ?? errorText ?? "Run failed."
+        case .done:
+            return runStatusText ?? runPlanningText ?? "Run complete."
+        case .idle:
+            return "Ready"
+        }
+    }
+
+    var hasRunDetails: Bool {
+        runPlannerPreview != nil || !runTodos.isEmpty || !runFeedbackEvents.isEmpty
     }
 
     init(initialProjectRootURL: URL? = nil, initialBackendURL: URL? = nil) {
@@ -421,6 +482,7 @@ final class AppViewModel: ObservableObject {
             documentBuffers.removeValue(forKey: closing.relativePath)
             autosaveTasksByPath[closing.relativePath]?.cancel()
             autosaveTasksByPath[closing.relativePath] = nil
+            externallyChangedBufferPaths.remove(closing.relativePath)
         }
         persistTabsForProject()
     }
@@ -751,6 +813,7 @@ final class AppViewModel: ObservableObject {
         workspaceTabs = []
         activeTabID = nil
         documentBuffers = [:]
+        externallyChangedBufferPaths = []
         selectedExplorerPath = nil
         folderViewPath = ""
     }
@@ -775,6 +838,92 @@ final class AppViewModel: ObservableObject {
             fileSizeBytes: item.fileSizeBytes,
             modifiedAt: item.modifiedAt
         )
+    }
+
+    func reloadBufferFromDisk(relativePath: String, force: Bool = false) {
+        guard let projectRootURL else { return }
+        guard var buffer = documentBuffers[relativePath] else { return }
+        guard force || !buffer.isDirty else { return }
+
+        let itemURL = projectRootURL.appendingPathComponent(relativePath).standardizedFileURL
+        guard let data = try? Data(contentsOf: itemURL) else {
+            return
+        }
+        let shouldForceText = buffer.fileKind.isEditable || buffer.fileKind == .csv
+        let decoded = TextFileDecoder.decode(data: data, forceText: shouldForceText)
+        let fileItem = files.first(where: { !$0.isDirectory && $0.relativePath == relativePath })
+
+        buffer.content = decoded.text
+        buffer.lastSavedContent = decoded.text
+        buffer.isDirty = false
+        buffer.isBinary = decoded.isBinary
+        buffer.fileSizeBytes = fileItem?.fileSizeBytes ?? Int64(data.count)
+        buffer.modifiedAt = fileItem?.modifiedAt ?? Date()
+        documentBuffers[relativePath] = buffer
+        externallyChangedBufferPaths.remove(relativePath)
+    }
+
+    func syncOpenBuffersWithDisk(scanned: [FileItem]) {
+        guard projectRootURL != nil else {
+            externallyChangedBufferPaths = []
+            return
+        }
+
+        let openPaths = Set(workspaceTabs.map(\.relativePath))
+        externallyChangedBufferPaths = externallyChangedBufferPaths.intersection(openPaths)
+
+        let scannedFilesByPath = Dictionary(
+            uniqueKeysWithValues: scanned
+                .filter { !$0.isDirectory }
+                .map { ($0.relativePath, $0) }
+        )
+
+        for path in openPaths {
+            guard let fileItem = scannedFilesByPath[path] else {
+                externallyChangedBufferPaths.remove(path)
+                continue
+            }
+            guard let buffer = documentBuffers[path] else { continue }
+
+            let shouldForceText = buffer.fileKind.isEditable || buffer.fileKind == .csv
+            guard let root = projectRootURL else { continue }
+            let itemURL = root.appendingPathComponent(path).standardizedFileURL
+            guard let data = try? Data(contentsOf: itemURL) else { continue }
+            let decoded = TextFileDecoder.decode(data: data, forceText: shouldForceText)
+            let diskContent = decoded.text
+
+            let diskDiffersFromLastSaved = buffer.lastSavedContent != diskContent ||
+                buffer.fileSizeBytes != fileItem.fileSizeBytes ||
+                buffer.modifiedAt != fileItem.modifiedAt ||
+                buffer.isBinary != decoded.isBinary
+
+            if !buffer.isDirty {
+                if diskDiffersFromLastSaved {
+                    reloadBufferFromDisk(relativePath: path, force: true)
+                } else {
+                    externallyChangedBufferPaths.remove(path)
+                }
+                continue
+            }
+
+            if buffer.content == diskContent {
+                var synced = buffer
+                synced.lastSavedContent = diskContent
+                synced.isDirty = false
+                synced.fileSizeBytes = fileItem.fileSizeBytes
+                synced.modifiedAt = fileItem.modifiedAt
+                synced.isBinary = decoded.isBinary
+                documentBuffers[path] = synced
+                externallyChangedBufferPaths.remove(path)
+                continue
+            }
+
+            if diskDiffersFromLastSaved {
+                externallyChangedBufferPaths.insert(path)
+            } else {
+                externallyChangedBufferPaths.remove(path)
+            }
+        }
     }
 
     func updateDocumentContent(relativePath: String, content: String) {
@@ -870,6 +1019,15 @@ final class AppViewModel: ObservableObject {
                 task.cancel()
             }
         }
+
+        var remappedExternalPaths = externallyChangedBufferPaths
+        for (oldBufferPath, newBufferPath) in remap {
+            if remappedExternalPaths.contains(oldBufferPath) {
+                remappedExternalPaths.remove(oldBufferPath)
+                remappedExternalPaths.insert(newBufferPath)
+            }
+        }
+        externallyChangedBufferPaths = remappedExternalPaths
         persistTabsForProject()
     }
 
@@ -896,6 +1054,7 @@ final class AppViewModel: ObservableObject {
             documentBuffers.removeValue(forKey: path)
             autosaveTasksByPath[path]?.cancel()
             autosaveTasksByPath[path] = nil
+            externallyChangedBufferPaths.remove(path)
         }
         persistTabsForProject()
     }
@@ -912,6 +1071,7 @@ final class AppViewModel: ObservableObject {
                 documentBuffers.removeValue(forKey: stale)
                 autosaveTasksByPath[stale]?.cancel()
                 autosaveTasksByPath[stale] = nil
+                externallyChangedBufferPaths.remove(stale)
             }
             if let activeTabID, !workspaceTabs.contains(where: { $0.id == activeTabID }) {
                 self.activeTabID = workspaceTabs.last?.id
@@ -1261,14 +1421,34 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func openTaggedOutputPathInPreview(_ rawPath: String) {
+        Task { [weak self] in
+            await self?.openTaggedOutputPathInPreviewAsync(rawPath)
+        }
+    }
+
+    private func openTaggedOutputPathInPreviewAsync(_ rawPath: String) async {
+        guard let resolved = resolveTaggedPath(rawPath) else { return }
+        await refreshFiles(force: true, triggerChangeIndex: false)
+        openFile(relativePath: resolved.relativePath, mode: .preview)
+        reloadBufferFromDisk(relativePath: resolved.relativePath, force: true)
+    }
+
     func openTaggedOutputPathInOS(_ rawPath: String) {
+        guard let resolved = resolveTaggedPath(rawPath) else { return }
+        if !NSWorkspace.shared.open(resolved.targetURL) {
+            errorText = "Could not open output file: \(resolved.cleanedPath)"
+        }
+    }
+
+    private func resolveTaggedPath(_ rawPath: String) -> (cleanedPath: String, targetURL: URL, relativePath: String)? {
         guard let projectRootURL else {
             errorText = "Open a project folder first."
-            return
+            return nil
         }
 
         let cleaned = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty else { return }
+        guard !cleaned.isEmpty else { return nil }
 
         let expanded = NSString(string: cleaned).expandingTildeInPath
         let root = projectRootURL.standardizedFileURL
@@ -1281,15 +1461,19 @@ final class AppViewModel: ObservableObject {
 
         guard isInsideProject(targetURL, root: root) else {
             errorText = "Blocked opening path outside project: \(cleaned)"
-            return
+            return nil
         }
         guard FileManager.default.fileExists(atPath: targetURL.path) else {
             errorText = "Output file not found: \(cleaned)"
-            return
+            return nil
         }
-        if !NSWorkspace.shared.open(targetURL) {
-            errorText = "Could not open output file: \(cleaned)"
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        guard targetURL.path.hasPrefix(rootPrefix) else {
+            errorText = "Could not resolve output file path: \(cleaned)"
+            return nil
         }
+        let relative = String(targetURL.path.dropFirst(rootPrefix.count))
+        return (cleanedPath: cleaned, targetURL: targetURL, relativePath: relative)
     }
 
     private struct PreparedProjectAccess {
@@ -1682,6 +1866,7 @@ final class AppViewModel: ObservableObject {
             lastFileSignature = nil
             workspaceTabs = []
             documentBuffers = [:]
+            externallyChangedBufferPaths = []
             activeTabID = nil
             return
         }
@@ -1700,6 +1885,7 @@ final class AppViewModel: ObservableObject {
         collapsedDirectoryPaths = collapsedDirectoryPaths.intersection(directoryPaths)
         lastFileSignature = signature
         reconcileWorkspaceAfterFileRefresh(scanned: scanned)
+        syncOpenBuffersWithDisk(scanned: scanned)
         refreshMentionState()
 
         guard triggerChangeIndex, hadPreviousSnapshot else { return }
@@ -1923,14 +2109,34 @@ final class AppViewModel: ObservableObject {
 
     private func clearPendingRunConfirmation() {
         pendingRunConfirmationID = nil
+        pendingRunRequiresConfirmation = false
         pendingRunOutcomeKind = nil
         pendingRunChanges = []
     }
 
     private func setPendingRunConfirmation(runID: String, run: RunDetail) {
         pendingRunConfirmationID = runID
+        pendingRunRequiresConfirmation = run.requiresConfirmation ?? (run.status.lowercased() == "awaiting_confirmation")
         pendingRunOutcomeKind = run.runOutcomeKind
         pendingRunChanges = run.changes
+    }
+
+    func hydratePendingConfirmation(runID: String) async {
+        guard let projectID = project?.id else { return }
+        do {
+            let run = try await client.run(projectID: projectID, runID: runID)
+            let status = run.status.lowercased()
+            if status == "awaiting_confirmation" || run.requiresConfirmation == true {
+                setPendingRunConfirmation(runID: runID, run: run)
+                await forceRefreshPreviewForPendingChanges()
+                return
+            }
+            if pendingRunConfirmationID == runID {
+                clearPendingRunConfirmation()
+            }
+        } catch {
+            // Keep current pending state and avoid UI churn on transient poll failures.
+        }
     }
 
     private func changedPathsForAutoOpen(_ changes: [MessagePart]) -> [String] {
@@ -1948,6 +2154,15 @@ final class AppViewModel: ObservableObject {
         return ordered
     }
 
+    private func forceRefreshPreviewForPendingChanges() async {
+        guard hasPendingRunConfirmation || pendingRunRequiresConfirmation else { return }
+        await refreshFiles(force: true, triggerChangeIndex: false)
+        for path in changedPathsForAutoOpen(pendingRunChanges).prefix(6) {
+            openFile(relativePath: path, mode: .preview)
+            reloadBufferFromDisk(relativePath: path, force: true)
+        }
+    }
+
     func applyPendingRunChanges() async {
         guard let projectID = project?.id else {
             errorText = "Open a project first"
@@ -1958,9 +2173,10 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        let changesToOpen = pendingRunChanges
+        let pendingChanges = pendingRunChanges
         do {
-            _ = try await client.applyRun(projectID: projectID, runID: runID)
+            let run = try await client.applyRun(projectID: projectID, runID: runID)
+            let changesToOpen = pendingChanges.isEmpty ? run.changes : pendingChanges
             clearPendingRunConfirmation()
             await refreshFiles(force: true, triggerChangeIndex: false)
             for path in changedPathsForAutoOpen(changesToOpen).prefix(6) {
@@ -2186,8 +2402,13 @@ final class AppViewModel: ObservableObject {
         case "run_confirmation_required":
             runThinkingText = nil
             runPlanningText = "Review changes and apply or discard."
-            if pendingRunConfirmationID == nil {
-                pendingRunConfirmationID = expectedRunID
+            pendingRunConfirmationID = expectedRunID
+            pendingRunRequiresConfirmation = true
+            if let outcomeKind = event.payload["outcome_kind"]?.stringValue, !outcomeKind.isEmpty {
+                pendingRunOutcomeKind = outcomeKind
+            }
+            Task {
+                await hydratePendingConfirmation(runID: expectedRunID)
             }
             appendRunFeedbackEvent(
                 type: "status",
@@ -2399,6 +2620,7 @@ final class AppViewModel: ObservableObject {
                             self.runPlanningText = "Review changes and apply or discard."
                             self.appendRunFeedbackEvent(type: "status", title: "Awaiting confirmation")
                         }
+                        await self.forceRefreshPreviewForPendingChanges()
                         if self.selectedConversationID == conversationID {
                             await self.loadMessages(conversationID: conversationID)
                         }
@@ -2476,6 +2698,7 @@ final class AppViewModel: ObservableObject {
                         self.runThinkingText = nil
                         self.runPlanningText = "Review changes and apply or discard."
                     }
+                    await self.forceRefreshPreviewForPendingChanges()
                     if self.selectedConversationID == conversationID {
                         await self.loadMessages(conversationID: conversationID)
                     }
