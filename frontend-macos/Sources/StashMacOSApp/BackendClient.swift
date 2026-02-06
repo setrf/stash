@@ -190,6 +190,24 @@ struct BackendClient {
         )
     }
 
+    func applyRun(projectID: String, runID: String) async throws -> RunDetail {
+        try await request(
+            path: "/v1/projects/\(projectID)/runs/\(runID)/apply",
+            method: "POST",
+            body: Optional<Int>.none,
+            timeout: 30
+        )
+    }
+
+    func discardRun(projectID: String, runID: String) async throws -> RunDetail {
+        try await request(
+            path: "/v1/projects/\(projectID)/runs/\(runID)/discard",
+            method: "POST",
+            body: Optional<Int>.none,
+            timeout: 30
+        )
+    }
+
     func triggerIndex(projectID: String, fullScan: Bool = true) async throws {
         struct Payload: Encodable {
             let fullScan: Bool

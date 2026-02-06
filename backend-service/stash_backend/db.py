@@ -58,6 +58,21 @@ CREATE TABLE IF NOT EXISTS runs (
   FOREIGN KEY(trigger_message_id) REFERENCES messages(id)
 );
 
+CREATE TABLE IF NOT EXISTS run_change_sets (
+  run_id TEXT PRIMARY KEY,
+  outcome_kind TEXT NOT NULL DEFAULT 'response_only',
+  requires_confirmation INTEGER NOT NULL DEFAULT 0,
+  change_set_id TEXT,
+  changes_json TEXT,
+  preview_path TEXT,
+  status TEXT NOT NULL DEFAULT 'none',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(run_id) REFERENCES runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_change_sets_status ON run_change_sets(status);
+
 CREATE TABLE IF NOT EXISTS run_steps (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
@@ -548,6 +563,7 @@ class ProjectRepository:
         return self._run_row_to_view(row)
 
     def _run_row_to_view(self, row: dict[str, Any]) -> dict[str, Any]:
+        change_set = self.get_run_change_set(str(row["id"]))
         return {
             "id": row["id"],
             "project_id": self.ctx.project_id,
@@ -559,6 +575,10 @@ class ProjectRepository:
             "error": row.get("error"),
             "created_at": row["created_at"],
             "finished_at": row.get("finished_at"),
+            "run_outcome_kind": (change_set or {}).get("outcome_kind", "response_only"),
+            "requires_confirmation": bool((change_set or {}).get("requires_confirmation", False)),
+            "change_set_id": (change_set or {}).get("change_set_id"),
+            "changes": (change_set or {}).get("changes", []),
         }
 
     def update_run(self, run_id: str, *, status: str, output_summary: str | None = None, error: str | None = None, finished: bool = False) -> dict[str, Any] | None:
@@ -577,6 +597,87 @@ class ProjectRepository:
             (status, next_output, next_error, finished_at, run_id),
         )
         return self.get_run(run_id)
+
+    def upsert_run_change_set(
+        self,
+        run_id: str,
+        *,
+        outcome_kind: str,
+        requires_confirmation: bool,
+        change_set_id: str | None,
+        changes: list[dict[str, Any]],
+        preview_path: str | None,
+        status: str,
+    ) -> None:
+        now = utc_now_iso()
+        self._execute(
+            """
+            INSERT INTO run_change_sets(
+              run_id, outcome_kind, requires_confirmation, change_set_id, changes_json, preview_path, status, created_at, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+              outcome_kind=excluded.outcome_kind,
+              requires_confirmation=excluded.requires_confirmation,
+              change_set_id=excluded.change_set_id,
+              changes_json=excluded.changes_json,
+              preview_path=excluded.preview_path,
+              status=excluded.status,
+              updated_at=excluded.updated_at
+            """,
+            (
+                run_id,
+                outcome_kind,
+                1 if requires_confirmation else 0,
+                change_set_id,
+                dumps_json(changes),
+                preview_path,
+                status,
+                now,
+                now,
+            ),
+        )
+
+    def update_run_change_set_status(self, run_id: str, *, status: str, requires_confirmation: bool | None = None) -> None:
+        current = self.get_run_change_set(run_id)
+        if not current:
+            return
+        next_requires_confirmation = (
+            bool(requires_confirmation)
+            if requires_confirmation is not None
+            else bool(current.get("requires_confirmation", False))
+        )
+        self._execute(
+            """
+            UPDATE run_change_sets
+            SET status=?, requires_confirmation=?, updated_at=?
+            WHERE run_id=?
+            """,
+            (status, 1 if next_requires_confirmation else 0, utc_now_iso(), run_id),
+        )
+
+    def get_run_change_set(self, run_id: str) -> dict[str, Any] | None:
+        row = self._fetchone(
+            """
+            SELECT run_id, outcome_kind, requires_confirmation, change_set_id, changes_json, preview_path, status, created_at, updated_at
+            FROM run_change_sets
+            WHERE run_id=?
+            """,
+            (run_id,),
+        )
+        if not row:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "outcome_kind": row.get("outcome_kind") or "response_only",
+            "requires_confirmation": bool(int(row.get("requires_confirmation") or 0)),
+            "change_set_id": row.get("change_set_id"),
+            "changes": loads_json(row.get("changes_json"), []),
+            "preview_path": row.get("preview_path"),
+            "status": row.get("status") or "none",
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
 
     def recover_orphaned_runs(
         self,

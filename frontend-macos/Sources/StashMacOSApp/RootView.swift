@@ -19,9 +19,9 @@ public struct RootView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            MinimalTopBar(viewModel: viewModel)
+            WorkspaceTopBar(viewModel: viewModel)
                 .padding(.horizontal, 16)
-                .padding(.vertical, 10)
+                .padding(.vertical, 8)
                 .background(CodexTheme.panel)
 
             Divider()
@@ -49,6 +49,13 @@ public struct RootView: View {
                         .background(CodexTheme.canvas)
                 }
             }
+
+            Divider()
+
+            WorkspaceUtilityBar(viewModel: viewModel)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(CodexTheme.panel)
         }
         .background(CodexTheme.canvas)
         .task {
@@ -61,101 +68,112 @@ public struct RootView: View {
     }
 }
 
-private struct MinimalTopBar: View {
+private struct WorkspaceTopBar: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text("Stash")
-                .font(.system(size: 21, weight: .semibold, design: .rounded))
+                .font(.system(size: 19, weight: .semibold, design: .rounded))
                 .foregroundStyle(CodexTheme.textPrimary)
+
+            if let projectName = viewModel.project?.name, !projectName.isEmpty {
+                Text(projectName)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(CodexTheme.textSecondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        Capsule()
+                            .fill(Color.white)
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(CodexTheme.border, lineWidth: 1)
+                    )
+            }
 
             Spacer()
 
             Button {
-                viewModel.presentProjectPicker()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "folder")
-                    Text(viewModel.project?.name ?? "Choose Project Folder")
-                        .lineLimit(1)
-                }
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(CodexTheme.textPrimary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(CodexTheme.border, lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
-
-            Button {
                 viewModel.openSetupSheet()
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "gearshape")
-                    Text("AI Setup")
-                }
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(CodexTheme.textPrimary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.white)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(CodexTheme.border, lineWidth: 1)
-                )
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(CodexTheme.textSecondary)
+                    .padding(8)
             }
             .buttonStyle(.plain)
-
-            StatusBadge(
-                text: viewModel.backendConnected ? "Backend Connected" : "Backend Offline",
-                color: viewModel.backendConnected ? CodexTheme.success : CodexTheme.warning
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white)
             )
-
-            StatusBadge(
-                text: viewModel.aiSetupBadgeText,
-                color: viewModel.aiSetupReady ? CodexTheme.success : CodexTheme.warning
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(CodexTheme.border, lineWidth: 1)
             )
-
-            if let indexingStatusText = viewModel.indexingStatusText {
-                StatusBadge(text: indexingStatusText, color: CodexTheme.accent)
-            }
-
-            if let runStatusText = viewModel.runStatusText {
-                StatusBadge(text: runStatusText, color: viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary)
-            }
+            .help("AI setup")
         }
     }
 }
 
-private struct StatusBadge: View {
-    let text: String
-    let color: Color
+private struct WorkspaceUtilityBar: View {
+    @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(color)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(Color.white)
+        HStack(spacing: 12) {
+            utilityPill(
+                icon: viewModel.backendConnected ? "checkmark.circle.fill" : "exclamationmark.triangle.fill",
+                text: viewModel.backendConnected ? "Backend" : "Backend Offline",
+                color: viewModel.backendConnected ? CodexTheme.success : CodexTheme.warning
             )
-            .overlay(
-                Capsule()
-                    .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+
+            utilityPill(
+                icon: viewModel.aiSetupReady ? "sparkles" : "sparkles.slash",
+                text: viewModel.aiSetupReady ? "AI Ready" : "AI Setup",
+                color: viewModel.aiSetupReady ? CodexTheme.success : CodexTheme.warning
             )
+
+            if let indexingStatusText = viewModel.indexingStatusText {
+                utilityPill(icon: "arrow.triangle.2.circlepath", text: indexingStatusText, color: CodexTheme.accent)
+            }
+
+            if let runStatusText = viewModel.runStatusText {
+                utilityPill(
+                    icon: viewModel.runInProgress ? "play.circle.fill" : "checkmark.circle",
+                    text: runStatusText,
+                    color: viewModel.runInProgress ? CodexTheme.accent : CodexTheme.textSecondary
+                )
+            }
+
+            Spacer()
+
+            Text("⌘↩ Send")
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(CodexTheme.textSecondary)
+        }
+    }
+
+    private func utilityPill(icon: String, text: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(text)
+                .lineLimit(1)
+        }
+        .font(.system(size: 10, weight: .semibold, design: .rounded))
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(Color.white)
+        )
+        .overlay(
+            Capsule()
+                .stroke(CodexTheme.border.opacity(0.85), lineWidth: 1)
+        )
     }
 }
 
@@ -376,6 +394,12 @@ private struct ChatPanel: View {
                 !viewModel.runFeedbackEvents.isEmpty
             {
                 RunFeedbackCard(viewModel: viewModel)
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 8)
+            }
+
+            if viewModel.hasPendingRunConfirmation {
+                PendingRunChangesCard(viewModel: viewModel)
                     .padding(.horizontal, 18)
                     .padding(.bottom, 8)
             }
@@ -648,6 +672,108 @@ private struct RunFeedbackCard: View {
         default:
             return CodexTheme.textSecondary
         }
+    }
+}
+
+private struct PendingRunChangesCard: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Pending Changes")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(CodexTheme.textSecondary)
+                Spacer()
+                if let outcome = viewModel.pendingRunOutcomeKind, !outcome.isEmpty {
+                    Text(outcome.replacingOccurrences(of: "_", with: " "))
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(viewModel.pendingRunChanges.prefix(8))) { change in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: icon(for: change.type))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(color(for: change.type))
+                            .padding(.top, 1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(label(for: change))
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(CodexTheme.textPrimary)
+                            if let summary = change.summary, !summary.isEmpty {
+                                Text(summary)
+                                    .font(.system(size: 11, weight: .regular, design: .rounded))
+                                    .foregroundStyle(CodexTheme.textSecondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button("Discard") {
+                    Task { await viewModel.discardPendingRunChanges() }
+                }
+                .buttonStyle(.bordered)
+
+                Button("Apply") {
+                    Task { await viewModel.applyPendingRunChanges() }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+        )
+    }
+
+    private func icon(for type: String) -> String {
+        switch type.lowercased() {
+        case "edit_file":
+            return "pencil"
+        case "output_file":
+            return "doc.badge.plus"
+        case "delete_file":
+            return "trash"
+        case "rename_file":
+            return "arrow.left.arrow.right"
+        default:
+            return "doc"
+        }
+    }
+
+    private func color(for type: String) -> Color {
+        switch type.lowercased() {
+        case "delete_file":
+            return CodexTheme.danger
+        case "output_file":
+            return CodexTheme.accent
+        default:
+            return CodexTheme.textSecondary
+        }
+    }
+
+    private func label(for change: MessagePart) -> String {
+        switch change.type.lowercased() {
+        case "rename_file":
+            if let fromPath = change.fromPath, let path = change.path {
+                return "\(fromPath) -> \(path)"
+            }
+        default:
+            break
+        }
+        return change.path ?? change.fromPath ?? change.type
     }
 }
 
@@ -1003,6 +1129,40 @@ private struct MessageRow: View {
         return extractStashFileTags(from: message.content)
     }
 
+    private var structuredOutputFiles: [String] {
+        guard !isUser else { return [] }
+        var ordered: [String] = []
+        var seen = Set<String>()
+        for part in message.parts where part.type.lowercased() == "output_file" {
+            guard let path = part.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { continue }
+            let lowered = path.lowercased()
+            if seen.contains(lowered) { continue }
+            seen.insert(lowered)
+            ordered.append(path)
+        }
+        return ordered
+    }
+
+    private var changedFileParts: [MessagePart] {
+        guard !isUser else { return [] }
+        return message.parts.filter { part in
+            let type = part.type.lowercased()
+            return type == "edit_file" || type == "delete_file" || type == "rename_file"
+        }
+    }
+
+    private var allOutputFiles: [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        for path in structuredOutputFiles + taggedOutputFiles {
+            let lowered = path.lowercased()
+            if seen.contains(lowered) { continue }
+            seen.insert(lowered)
+            ordered.append(path)
+        }
+        return ordered
+    }
+
     var body: some View {
         HStack {
             if isUser { Spacer(minLength: 60) }
@@ -1023,12 +1183,57 @@ private struct MessageRow: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                if !taggedOutputFiles.isEmpty {
+                if !changedFileParts.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Changed Files")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                        ForEach(changedFileParts) { change in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: icon(for: change.type))
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(color(for: change.type))
+                                    Text(changeLabel(change))
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(CodexTheme.textPrimary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                                if let summary = change.summary, !summary.isEmpty {
+                                    Text(summary)
+                                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                                        .foregroundStyle(CodexTheme.textSecondary)
+                                        .lineLimit(2)
+                                }
+                                if let diff = change.diff, !diff.isEmpty {
+                                    Text(diff)
+                                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                        .foregroundStyle(CodexTheme.textSecondary)
+                                        .lineLimit(5)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(CodexTheme.canvas.opacity(0.95))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(CodexTheme.border.opacity(0.9), lineWidth: 1)
+                            )
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+
+                if !allOutputFiles.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Output Files")
                             .font(.system(size: 10, weight: .bold, design: .rounded))
                             .foregroundStyle(CodexTheme.textSecondary)
-                        ForEach(taggedOutputFiles, id: \.self) { path in
+                        ForEach(allOutputFiles, id: \.self) { path in
                             Button {
                                 onOpenTaggedFile(path)
                             } label: {
@@ -1075,6 +1280,40 @@ private struct MessageRow: View {
 
             if !isUser { Spacer(minLength: 60) }
         }
+    }
+
+    private func icon(for type: String) -> String {
+        switch type.lowercased() {
+        case "edit_file":
+            return "pencil"
+        case "delete_file":
+            return "trash"
+        case "rename_file":
+            return "arrow.left.arrow.right"
+        default:
+            return "doc"
+        }
+    }
+
+    private func color(for type: String) -> Color {
+        switch type.lowercased() {
+        case "delete_file":
+            return CodexTheme.danger
+        case "edit_file":
+            return CodexTheme.accent
+        default:
+            return CodexTheme.textSecondary
+        }
+    }
+
+    private func changeLabel(_ change: MessagePart) -> String {
+        if change.type.lowercased() == "rename_file",
+           let fromPath = change.fromPath,
+           let path = change.path
+        {
+            return "\(fromPath) -> \(path)"
+        }
+        return change.path ?? change.fromPath ?? change.type
     }
 
     private func stripCodexCommandBlocks(from text: String) -> String {

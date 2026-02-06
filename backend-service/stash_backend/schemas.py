@@ -94,6 +94,10 @@ class RunResponse(BaseModel):
     error: str | None = None
     created_at: str
     finished_at: str | None = None
+    run_outcome_kind: Literal["response_only", "edit_files", "output_files", "mixed"] = "response_only"
+    requires_confirmation: bool = False
+    change_set_id: str | None = None
+    changes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AssetCreateRequest(BaseModel):

@@ -353,6 +353,20 @@ def create_app(services: Services) -> FastAPI:
             raise HTTPException(status_code=404, detail="Run not found")
         return RunResponse(**result)
 
+    @app.post("/v1/projects/{project_id}/runs/{run_id}/apply", response_model=RunResponse)
+    async def apply_run(project_id: str, run_id: str) -> RunResponse:
+        result = await asyncio.to_thread(services.orchestrator.apply_run_changes, project_id=project_id, run_id=run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Run not found or no pending change set")
+        return RunResponse(**result)
+
+    @app.post("/v1/projects/{project_id}/runs/{run_id}/discard", response_model=RunResponse)
+    async def discard_run(project_id: str, run_id: str) -> RunResponse:
+        result = await asyncio.to_thread(services.orchestrator.discard_run_changes, project_id=project_id, run_id=run_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Run not found or no pending change set")
+        return RunResponse(**result)
+
     @app.post("/v1/projects/{project_id}/assets", response_model=AssetResponse)
     async def create_asset(project_id: str, request: AssetCreateRequest) -> AssetResponse:
         context, repo = _repo_or_404(services, project_id)

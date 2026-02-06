@@ -75,6 +75,54 @@ This does a single local setup for the stack:
 - Uses app-managed runtime configuration (no `.env` setup required)
 - Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
 
+## Install Desktop App From Scratch (macOS)
+
+Use this when you want a local `.app` bundle (menu bar overlay + workspace window) instead of running backend/frontend in separate terminals.
+
+Prerequisites:
+- macOS 14+
+- Xcode Command Line Tools (`xcode-select --install`)
+- `python3` and `swift` available in `PATH`
+
+From repo root:
+
+```bash
+./scripts/desktop/install_desktop_app.sh
+```
+
+What this installer does:
+- Creates a dedicated backend runtime at `~/Library/Application Support/StashLocal/runtime/.venv`
+- Installs backend package and runtime tools (including `uv` and `pypdf`)
+- Builds frontend release binaries (`StashMacOSApp` and `StashOverlay`)
+- Installs `Stash Local.app` to `~/Desktop` by default
+
+Launch the app:
+
+```bash
+open "$HOME/Desktop/Stash Local.app"
+```
+
+Optional installer overrides:
+
+```bash
+STASH_DESKTOP_TARGET_DIR="/Applications" \
+STASH_DESKTOP_APP_NAME="Stash Local.app" \
+STASH_BACKEND_URL="http://127.0.0.1:8765" \
+STASH_CODEX_MODE="cli" \
+./scripts/desktop/install_desktop_app.sh
+```
+
+Reinstall after updates:
+
+```bash
+./scripts/desktop/install_desktop_app.sh
+```
+
+Useful logs:
+- `~/Library/Logs/StashLocal/backend.log`
+- `~/Library/Logs/StashLocal/frontend.log`
+- `~/Library/Logs/StashLocal/overlay.log`
+
 ## One Command To Run Everything
 
 From repo root:

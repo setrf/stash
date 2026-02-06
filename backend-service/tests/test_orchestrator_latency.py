@@ -69,10 +69,12 @@ class _FakeCodex:
         delays_by_command: dict[str, float] | None = None,
         direct_commands: list[DirectCommandResult] | None = None,
         direct_assistant_text: str = "Direct execution complete.",
+        mutate_files: bool = False,
     ):
         self.delays_by_command = delays_by_command or {}
         self.direct_commands = direct_commands
         self.direct_assistant_text = direct_assistant_text
+        self.mutate_files = mutate_files
         self.starts: dict[str, float] = {}
         self.ends: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -85,6 +87,14 @@ class _FakeCodex:
         delay = float(self.delays_by_command.get(command.cmd, 0.01))
         if delay > 0:
             time.sleep(delay)
+
+        if self.mutate_files:
+            cmd = command.cmd.strip()
+            if cmd.startswith("touch "):
+                target = cmd.removeprefix("touch ").strip().split(" ", 1)[0]
+                path = context.root_path / target
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
 
         finished = time.monotonic()
         with self._lock:
@@ -346,6 +356,75 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         assistants = [msg for msg in messages if msg.get("role") == "assistant"]
         self.assertTrue(assistants)
         self.assertEqual(assistants[-1].get("parts"), [])
+
+    async def test_preview_changes_require_confirmation_then_apply(self) -> None:
+        planner = _FakePlanner(
+            [
+                _plan_with_commands(
+                    (
+                        "Create file.\n"
+                        "<codex_cmd>\nworktree: main\ncwd: .\ncmd: touch output.txt\n</codex_cmd>\n"
+                    ),
+                    used_backend="codex",
+                )
+            ],
+            synthesized_text="Prepared changes.",
+        )
+        codex = _FakeCodex(mutate_files=True)
+        runtime_store = _FakeRuntimeConfigStore(RuntimeConfig(execution_mode="planner"))
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=runtime_store,  # type: ignore[arg-type]
+        )
+
+        run_id = await self._run_orchestrator(orchestrator)
+        run = self.repo.get_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run["status"], "awaiting_confirmation")
+        self.assertFalse((self.context.root_path / "output.txt").exists())
+        self.assertTrue(run.get("requires_confirmation"))
+
+        applied = orchestrator.apply_run_changes(project_id=self.context.project_id, run_id=run_id)
+        self.assertIsNotNone(applied)
+        self.assertEqual(applied["status"], "done")
+        self.assertTrue((self.context.root_path / "output.txt").exists())
+
+    async def test_discard_preview_changes_keeps_project_unmodified(self) -> None:
+        planner = _FakePlanner(
+            [
+                _plan_with_commands(
+                    (
+                        "Create file.\n"
+                        "<codex_cmd>\nworktree: main\ncwd: .\ncmd: touch should_discard.txt\n</codex_cmd>\n"
+                    ),
+                    used_backend="codex",
+                )
+            ],
+            synthesized_text="Prepared changes.",
+        )
+        codex = _FakeCodex(mutate_files=True)
+        runtime_store = _FakeRuntimeConfigStore(RuntimeConfig(execution_mode="planner"))
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=runtime_store,  # type: ignore[arg-type]
+        )
+
+        run_id = await self._run_orchestrator(orchestrator)
+        run = self.repo.get_run(run_id)
+        self.assertIsNotNone(run)
+        self.assertEqual(run["status"], "awaiting_confirmation")
+        self.assertFalse((self.context.root_path / "should_discard.txt").exists())
+
+        discarded = orchestrator.discard_run_changes(project_id=self.context.project_id, run_id=run_id)
+        self.assertIsNotNone(discarded)
+        self.assertEqual(discarded["status"], "cancelled")
+        self.assertFalse((self.context.root_path / "should_discard.txt").exists())
 
 
 if __name__ == "__main__":

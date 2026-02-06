@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import difflib
+import hashlib
+import io
+import json
 import logging
+import os
 import re
 import shlex
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +22,7 @@ from .planner import Planner
 from .project_store import ProjectStore
 from .runtime_config import RuntimeConfig, RuntimeConfigStore
 from .skills import load_skill_bundle
+from .types import ProjectContext
 from .utils import ensure_inside
 
 logger = logging.getLogger(__name__)
@@ -33,6 +41,15 @@ READ_ONLY_PARALLEL_PREFIXES = {"cat", "ls", "pwd", "find", "grep", "sed", "awk",
 READ_ONLY_GIT_SUBCOMMANDS = {"status", "show", "log", "diff", "branch", "rev-parse", "ls-files"}
 WRITE_PREFIXES = {"touch", "cp", "mv", "mkdir", "python", "python3", "node", "npm", "uv", "sh", "bash"}
 UNSAFE_SHELL_MARKERS = ("&&", "||", ";", "|", "`", "$(", "\n")
+TEXT_EXTENSIONS = {
+    "txt", "md", "markdown", "json", "yaml", "yml", "xml", "html", "rtf", "log", "ini", "cfg", "conf",
+    "swift", "py", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "c", "cc", "cpp", "h", "hpp",
+    "sh", "bash", "zsh", "sql", "toml", "csv", "tsv",
+}
+CSV_EXTENSIONS = {"csv", "tsv"}
+OFFICE_EXTENSIONS = {"doc", "docx", "xls", "xlsx", "ppt", "pptx"}
+MAX_CHANGE_DIFF_CHARS = 5000
+IGNORED_CHANGE_PATHS = {"STASH_HISTORY.md"}
 
 
 class RunOrchestrator:
@@ -356,6 +373,666 @@ class RunOrchestrator:
             return normalized + "\n\n" + suffix
         return suffix
 
+    def _preview_base_dir(self, context: ProjectContext, run_id: str) -> Path:
+        return context.stash_dir / "run-previews" / run_id
+
+    def _preview_workspace_path(self, context: ProjectContext, run_id: str) -> Path:
+        return self._preview_base_dir(context, run_id) / "workspace"
+
+    def _prepare_preview_workspace(self, context: ProjectContext, run_id: str) -> Path:
+        preview_base = self._preview_base_dir(context, run_id)
+        preview_workspace = self._preview_workspace_path(context, run_id)
+        if preview_base.exists():
+            shutil.rmtree(preview_base, ignore_errors=True)
+        preview_base.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            context.root_path,
+            preview_workspace,
+            ignore=shutil.ignore_patterns(".stash"),
+            dirs_exist_ok=False,
+        )
+        return preview_workspace
+
+    def _cleanup_preview_workspace(self, context: ProjectContext, run_id: str) -> None:
+        preview_base = self._preview_base_dir(context, run_id)
+        if preview_base.exists():
+            shutil.rmtree(preview_base, ignore_errors=True)
+
+    def _build_preview_context(self, context: ProjectContext, preview_root: Path) -> ProjectContext:
+        return ProjectContext(
+            project_id=context.project_id,
+            name=context.name,
+            root_path=preview_root,
+            stash_dir=context.stash_dir,
+            db_path=context.db_path,
+            conn=context.conn,
+            lock=context.lock,
+            permission=context.permission,
+        )
+
+    def _collect_file_inventory(self, root: Path) -> dict[str, dict[str, Any]]:
+        inventory: dict[str, dict[str, Any]] = {}
+        root = root.resolve()
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel_dir = Path(dirpath).relative_to(root)
+            if rel_dir.parts and rel_dir.parts[0] == ".stash":
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if d != ".stash"]
+
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    stat = path.stat()
+                    if not path.is_file():
+                        continue
+                    rel = str(path.relative_to(root))
+                    if rel in IGNORED_CHANGE_PATHS:
+                        continue
+                    digest = self._sha256(path)
+                    inventory[rel] = {
+                        "hash": digest,
+                        "size": int(stat.st_size),
+                        "mtime_ns": int(stat.st_mtime_ns),
+                    }
+                except OSError:
+                    continue
+        return inventory
+
+    def _sha256(self, path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _read_text_file(self, path: Path) -> str | None:
+        try:
+            stat = path.stat()
+            if stat.st_size > 512 * 1024:
+                return None
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        if b"\x00" in raw:
+            return None
+        for encoding in ("utf-8", "utf-16", "utf-16-le", "utf-16-be", "latin-1"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return None
+
+    def _build_text_diff(self, old_text: str, new_text: str, rel_path: str) -> str:
+        diff_lines = difflib.unified_diff(
+            old_text.splitlines(),
+            new_text.splitlines(),
+            fromfile=f"a/{rel_path}",
+            tofile=f"b/{rel_path}",
+            lineterm="",
+            n=3,
+        )
+        joined = "\n".join(diff_lines).strip()
+        if len(joined) > MAX_CHANGE_DIFF_CHARS:
+            return joined[:MAX_CHANGE_DIFF_CHARS] + "\n... (truncated)"
+        return joined
+
+    def _csv_cell_changes(self, old_text: str, new_text: str, limit: int = 24) -> list[dict[str, Any]]:
+        try:
+            old_rows = list(csv.reader(io.StringIO(old_text)))
+            new_rows = list(csv.reader(io.StringIO(new_text)))
+        except Exception:
+            return []
+
+        max_rows = max(len(old_rows), len(new_rows))
+        changes: list[dict[str, Any]] = []
+        for row_index in range(max_rows):
+            old_row = old_rows[row_index] if row_index < len(old_rows) else []
+            new_row = new_rows[row_index] if row_index < len(new_rows) else []
+            max_cols = max(len(old_row), len(new_row))
+            for col_index in range(max_cols):
+                old_cell = old_row[col_index] if col_index < len(old_row) else ""
+                new_cell = new_row[col_index] if col_index < len(new_row) else ""
+                if old_cell == new_cell:
+                    continue
+                changes.append(
+                    {
+                        "row": row_index,
+                        "column": col_index,
+                        "old": old_cell,
+                        "new": new_cell,
+                    }
+                )
+                if len(changes) >= limit:
+                    return changes
+        return changes
+
+    def _companion_output_path(self, rel_path: str) -> str:
+        source = Path(rel_path)
+        stem = source.stem
+        suffix = source.suffix
+        return str(source.with_name(f"{stem}_edited{suffix}"))
+
+    def _file_ext(self, rel_path: str) -> str:
+        return Path(rel_path).suffix.lstrip(".").lower()
+
+    def _normalize_office_change(self, change: dict[str, Any]) -> dict[str, Any]:
+        change_type = str(change.get("type") or "")
+        rel_path = str(change.get("path") or "")
+        from_path = str(change.get("from_path") or "")
+
+        ext = self._file_ext(rel_path or from_path)
+        if ext not in OFFICE_EXTENSIONS:
+            return change
+
+        if change_type in {"edit_file", "rename_file"}:
+            source_path = str(change.get("source_path") or rel_path)
+            companion = self._companion_output_path(rel_path or from_path)
+            return {
+                "type": "output_file",
+                "path": companion,
+                "source_path": source_path,
+                "summary": "Office source kept unchanged; companion edited output generated.",
+                "diff": change.get("diff"),
+                "csv_cell_changes": change.get("csv_cell_changes", []),
+            }
+        return change
+
+    def _derive_change_set(self, original_root: Path, preview_root: Path) -> list[dict[str, Any]]:
+        original = self._collect_file_inventory(original_root)
+        preview = self._collect_file_inventory(preview_root)
+
+        original_paths = set(original.keys())
+        preview_paths = set(preview.keys())
+        created = set(preview_paths - original_paths)
+        deleted = set(original_paths - preview_paths)
+        shared = original_paths.intersection(preview_paths)
+        modified = {path for path in shared if original[path]["hash"] != preview[path]["hash"]}
+
+        deleted_by_hash: dict[str, list[str]] = {}
+        for rel in deleted:
+            deleted_by_hash.setdefault(str(original[rel]["hash"]), []).append(rel)
+
+        rename_pairs: list[tuple[str, str]] = []
+        for rel in sorted(created):
+            digest = str(preview[rel]["hash"])
+            candidates = deleted_by_hash.get(digest) or []
+            if not candidates:
+                continue
+            old_rel = candidates.pop(0)
+            rename_pairs.append((old_rel, rel))
+            deleted.discard(old_rel)
+            created.discard(rel)
+
+        changes: list[dict[str, Any]] = []
+
+        for old_rel, new_rel in sorted(rename_pairs):
+            changes.append(
+                self._normalize_office_change(
+                    {
+                        "type": "rename_file",
+                        "from_path": old_rel,
+                        "path": new_rel,
+                        "source_path": new_rel,
+                        "summary": f"Renamed {old_rel} -> {new_rel}",
+                    }
+                )
+            )
+
+        for rel in sorted(created):
+            change: dict[str, Any] = {
+                "type": "output_file",
+                "path": rel,
+                "source_path": rel,
+                "summary": f"Created {rel}",
+            }
+            ext = self._file_ext(rel)
+            if ext in TEXT_EXTENSIONS:
+                new_text = self._read_text_file(preview_root / rel)
+                if new_text is not None:
+                    change["diff"] = self._build_text_diff("", new_text, rel)
+                    if ext in CSV_EXTENSIONS:
+                        change["csv_cell_changes"] = self._csv_cell_changes("", new_text)
+            changes.append(self._normalize_office_change(change))
+
+        for rel in sorted(modified):
+            change = {
+                "type": "edit_file",
+                "path": rel,
+                "source_path": rel,
+                "summary": f"Updated {rel}",
+            }
+            ext = self._file_ext(rel)
+            if ext in TEXT_EXTENSIONS:
+                old_text = self._read_text_file(original_root / rel)
+                new_text = self._read_text_file(preview_root / rel)
+                if old_text is not None and new_text is not None:
+                    change["diff"] = self._build_text_diff(old_text, new_text, rel)
+                    if ext in CSV_EXTENSIONS:
+                        change["csv_cell_changes"] = self._csv_cell_changes(old_text, new_text)
+            changes.append(self._normalize_office_change(change))
+
+        for rel in sorted(deleted):
+            changes.append(
+                self._normalize_office_change(
+                    {
+                        "type": "delete_file",
+                        "path": rel,
+                        "summary": f"Deleted {rel}",
+                    }
+                )
+            )
+
+        return changes
+
+    def _build_assistant_parts(self, *, output_files: list[str], changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        output_seen: set[str] = set()
+
+        for change in changes:
+            change_type = str(change.get("type") or "").strip()
+            if change_type not in {"output_file", "edit_file", "delete_file", "rename_file"}:
+                continue
+            part: dict[str, Any] = {"type": change_type}
+            if change.get("path"):
+                part["path"] = str(change["path"])
+            if change.get("from_path"):
+                part["from_path"] = str(change["from_path"])
+            if change.get("summary"):
+                part["summary"] = str(change["summary"])
+            if change.get("diff"):
+                part["diff"] = str(change["diff"])
+            csv_changes = change.get("csv_cell_changes")
+            if isinstance(csv_changes, list) and csv_changes:
+                part["csv_cell_changes"] = csv_changes[:24]
+            parts.append(part)
+            if change_type == "output_file" and change.get("path"):
+                output_seen.add(str(change["path"]).lower())
+
+        for path in output_files:
+            lowered = path.lower()
+            if lowered in output_seen:
+                continue
+            output_seen.add(lowered)
+            parts.append({"type": "output_file", "path": path})
+        return parts
+
+    def _derive_outcome_kind(self, *, changes: list[dict[str, Any]], output_files: list[str]) -> str:
+        has_edits = any(str(item.get("type")) in {"edit_file", "delete_file", "rename_file"} for item in changes)
+        has_outputs = any(str(item.get("type")) == "output_file" for item in changes) or bool(output_files)
+        if has_edits and has_outputs:
+            return "mixed"
+        if has_edits:
+            return "edit_files"
+        if has_outputs:
+            return "output_files"
+        return "response_only"
+
+    def _build_confirmation_text(self, *, base_text: str, changes: list[dict[str, Any]]) -> str:
+        lines = [
+            "Preview complete. Review proposed changes and choose Apply or Discard.",
+            f"Detected {len(changes)} change(s).",
+        ]
+        for change in changes[:12]:
+            change_type = str(change.get("type") or "change")
+            if change_type == "rename_file":
+                lines.append(f"- rename: {change.get('from_path', '')} -> {change.get('path', '')}")
+            else:
+                lines.append(f"- {change_type}: {change.get('path', '')}")
+        extra = "\n".join(lines)
+        normalized = base_text.strip()
+        if not normalized:
+            return extra
+        return normalized + "\n\n" + extra
+
+    def _write_change_set_manifest(
+        self,
+        *,
+        preview_root: Path,
+        run_id: str,
+        outcome_kind: str,
+        change_set_id: str | None,
+        changes: list[dict[str, Any]],
+    ) -> None:
+        manifest = {
+            "run_id": run_id,
+            "outcome_kind": outcome_kind,
+            "change_set_id": change_set_id,
+            "changes": changes,
+        }
+        manifest_path = preview_root.parent / "change-set.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+
+    def _apply_change_set(self, *, context: ProjectContext, changes: list[dict[str, Any]], preview_root: Path) -> dict[str, int]:
+        root = context.root_path.resolve()
+        copied = 0
+        deleted = 0
+
+        copy_ops: list[tuple[Path, Path]] = []
+        delete_targets: list[Path] = []
+
+        for change in changes:
+            change_type = str(change.get("type") or "")
+            rel_path = str(change.get("path") or "").strip()
+            from_rel = str(change.get("from_path") or "").strip()
+            source_rel = str(change.get("source_path") or rel_path).strip()
+
+            if change_type in {"output_file", "edit_file", "rename_file"} and rel_path:
+                src = (preview_root / source_rel).resolve()
+                dest = (root / rel_path).resolve()
+                if ensure_inside(preview_root, src) and ensure_inside(root, dest):
+                    copy_ops.append((src, dest))
+
+            if change_type == "delete_file" and rel_path:
+                target = (root / rel_path).resolve()
+                if ensure_inside(root, target):
+                    delete_targets.append(target)
+            elif change_type == "rename_file" and from_rel:
+                source_target = (root / from_rel).resolve()
+                if ensure_inside(root, source_target):
+                    delete_targets.append(source_target)
+
+        for src, dest in copy_ops:
+            if not src.exists():
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dest)
+            copied += 1
+
+        # Delete after copies to avoid accidental removal of source before destination materializes.
+        seen_deletes: set[str] = set()
+        for target in delete_targets:
+            key = str(target)
+            if key in seen_deletes:
+                continue
+            seen_deletes.add(key)
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                    deleted += 1
+                elif target.exists():
+                    target.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+
+        return {"copied": copied, "deleted": deleted}
+
+    def apply_run_changes(self, *, project_id: str, run_id: str) -> dict[str, Any] | None:
+        context = self.project_store.get(project_id)
+        if context is None:
+            return None
+        repo = ProjectRepository(context)
+        run = repo.get_run(run_id)
+        if run is None:
+            return None
+
+        change_set = repo.get_run_change_set(run_id)
+        if not change_set or not change_set.get("requires_confirmation"):
+            return None
+
+        preview_path_raw = str(change_set.get("preview_path") or "").strip()
+        if not preview_path_raw:
+            return None
+        preview_root = Path(preview_path_raw).expanduser().resolve()
+        if not ensure_inside(context.stash_dir.resolve(), preview_root):
+            return None
+
+        changes = change_set.get("changes")
+        if not isinstance(changes, list):
+            changes = []
+
+        apply_summary = self._apply_change_set(context=context, changes=changes, preview_root=preview_root)
+        self._cleanup_preview_workspace(context, run_id)
+        repo.update_run_change_set_status(run_id, status="applied", requires_confirmation=False)
+
+        summary_text = f"Applied {apply_summary['copied']} file update(s), removed {apply_summary['deleted']} item(s)."
+        repo.update_run(run_id, status="done", output_summary=summary_text, error=None, finished=True)
+        assistant_parts = self._build_assistant_parts(output_files=[], changes=changes)
+        final_message = repo.create_message(
+            run["conversation_id"],
+            role="assistant",
+            content=summary_text,
+            parts=assistant_parts,
+            parent_message_id=run.get("trigger_message_id"),
+            metadata={"run_id": run_id, "applied": True},
+        )
+        repo.add_event(
+            "run_applied",
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            payload={"copied": apply_summary["copied"], "deleted": apply_summary["deleted"]},
+        )
+        repo.add_event(
+            "message_finalized",
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            payload={"message_id": final_message["id"]},
+        )
+        repo.add_event(
+            "run_completed",
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            payload={"steps": len(repo.list_run_steps(run_id, include_output=False))},
+        )
+        return repo.get_run(run_id)
+
+    def discard_run_changes(self, *, project_id: str, run_id: str) -> dict[str, Any] | None:
+        context = self.project_store.get(project_id)
+        if context is None:
+            return None
+        repo = ProjectRepository(context)
+        run = repo.get_run(run_id)
+        if run is None:
+            return None
+
+        change_set = repo.get_run_change_set(run_id)
+        if not change_set or not change_set.get("requires_confirmation"):
+            return None
+
+        self._cleanup_preview_workspace(context, run_id)
+        repo.update_run_change_set_status(run_id, status="discarded", requires_confirmation=False)
+        repo.update_run(run_id, status="cancelled", output_summary="Preview changes discarded.", error=None, finished=True)
+
+        final_message = repo.create_message(
+            run["conversation_id"],
+            role="assistant",
+            content="Discarded preview changes. No project files were modified.",
+            parts=[],
+            parent_message_id=run.get("trigger_message_id"),
+            metadata={"run_id": run_id, "discarded": True},
+        )
+        repo.add_event(
+            "run_discarded",
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            payload={},
+        )
+        repo.add_event(
+            "message_finalized",
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            payload={"message_id": final_message["id"]},
+        )
+        repo.add_event(
+            "run_cancelled",
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            payload={"reason": "discarded_preview"},
+        )
+        return repo.get_run(run_id)
+
+    def _finalize_run_result(
+        self,
+        *,
+        context: ProjectContext,
+        repo: ProjectRepository,
+        conversation_id: str,
+        run_id: str,
+        trigger_message_id: str,
+        assistant_content: str,
+        output_files_for_response: list[str],
+        failures: int,
+        tool_summaries: list[str],
+        latency_summary_payload: dict[str, Any],
+        step_count: int,
+        preview_root: Path | None,
+    ) -> None:
+        changes: list[dict[str, Any]] = []
+        if preview_root is not None and preview_root.exists():
+            changes = self._derive_change_set(context.root_path.resolve(), preview_root.resolve())
+
+        merged_output_files: list[str] = []
+        output_seen: set[str] = set()
+        for item in output_files_for_response:
+            lowered = item.lower()
+            if lowered in output_seen:
+                continue
+            output_seen.add(lowered)
+            merged_output_files.append(item)
+        for change in changes:
+            if str(change.get("type") or "") != "output_file":
+                continue
+            rel = str(change.get("path") or "").strip()
+            if not rel:
+                continue
+            lowered = rel.lower()
+            if lowered in output_seen:
+                continue
+            output_seen.add(lowered)
+            merged_output_files.append(rel)
+
+        outcome_kind = self._derive_outcome_kind(changes=changes, output_files=merged_output_files)
+        requires_confirmation = bool(changes)
+        change_set_id = f"changes-{run_id}" if changes else None
+
+        if changes or merged_output_files:
+            repo.upsert_run_change_set(
+                run_id,
+                outcome_kind=outcome_kind,
+                requires_confirmation=requires_confirmation,
+                change_set_id=change_set_id,
+                changes=changes,
+                preview_path=str(preview_root) if (preview_root is not None and requires_confirmation) else None,
+                status="pending" if requires_confirmation else "none",
+            )
+
+        content = self._append_output_file_tags(assistant_content, merged_output_files)
+        if failures and tool_summaries:
+            content += "\n\nExecution summary:\n- " + "\n- ".join(tool_summaries)
+        elif not content.strip() and tool_summaries:
+            content = "Execution summary:\n- " + "\n- ".join(tool_summaries)
+
+        assistant_parts = self._build_assistant_parts(output_files=merged_output_files, changes=changes)
+
+        if requires_confirmation:
+            if preview_root is not None:
+                try:
+                    self._write_change_set_manifest(
+                        preview_root=preview_root,
+                        run_id=run_id,
+                        outcome_kind=outcome_kind,
+                        change_set_id=change_set_id,
+                        changes=changes,
+                    )
+                except OSError:
+                    logger.warning("Could not persist change-set manifest for run_id=%s", run_id)
+            content = self._build_confirmation_text(base_text=content, changes=changes)
+            final_message = repo.create_message(
+                conversation_id,
+                role="assistant",
+                content=content,
+                parts=assistant_parts,
+                parent_message_id=trigger_message_id,
+                metadata={"run_id": run_id, "requires_confirmation": True},
+            )
+            repo.add_event(
+                "message_finalized",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload={"message_id": final_message["id"]},
+            )
+            repo.update_run(
+                run_id,
+                status="awaiting_confirmation",
+                output_summary=f"{len(changes)} pending change(s)",
+                error=None,
+                finished=False,
+            )
+            repo.add_event(
+                "run_confirmation_required",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload={
+                    "change_set_id": change_set_id,
+                    "outcome_kind": outcome_kind,
+                    "changes": changes[:30],
+                },
+            )
+            repo.add_event(
+                "run_latency_summary",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload=latency_summary_payload,
+            )
+            return
+
+        if preview_root is not None:
+            self._cleanup_preview_workspace(context, run_id)
+
+        final_message = repo.create_message(
+            conversation_id,
+            role="assistant",
+            content=content or "Done.",
+            parts=assistant_parts,
+            parent_message_id=trigger_message_id,
+            metadata={"run_id": run_id},
+        )
+        repo.add_event(
+            "message_finalized",
+            conversation_id=conversation_id,
+            run_id=run_id,
+            payload={"message_id": final_message["id"]},
+        )
+
+        if failures:
+            repo.update_run(
+                run_id,
+                status="failed",
+                output_summary=f"{step_count} step(s), {failures} failed",
+                error="One or more run steps failed",
+                finished=True,
+            )
+            repo.add_event(
+                "run_failed",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload={"failures": failures, "latency_ms": latency_summary_payload},
+            )
+        else:
+            repo.update_run(
+                run_id,
+                status="done",
+                output_summary=f"{step_count} step(s) executed",
+                finished=True,
+            )
+            repo.add_event(
+                "run_completed",
+                conversation_id=conversation_id,
+                run_id=run_id,
+                payload={"steps": step_count, "latency_ms": latency_summary_payload},
+            )
+        repo.add_event(
+            "run_latency_summary",
+            conversation_id=conversation_id,
+            run_id=run_id,
+            payload=latency_summary_payload,
+        )
+
     def start_run(self, *, project_id: str, conversation_id: str, trigger_message_id: str, mode: str) -> dict[str, Any]:
         context = self.project_store.get(project_id)
         if context is None:
@@ -409,6 +1086,7 @@ class RunOrchestrator:
         self,
         *,
         context: Any,
+        command_context: Any,
         repo: ProjectRepository,
         conversation_id: str,
         run_id: str,
@@ -420,6 +1098,7 @@ class RunOrchestrator:
         run_started: float,
         scan_ms: int,
         search_ms: int,
+        preview_root: Path | None,
     ) -> None:
         planning_ms = 0
         synthesis_ms = 0
@@ -433,11 +1112,11 @@ class RunOrchestrator:
         direct_started = time.perf_counter()
         direct_result = await asyncio.to_thread(
             self.codex.execute_task,
-            context,
+            command_context,
             user_message=planner_user_message,
             conversation_history=history,
             skill_bundle=skills,
-            project_summary=repo.project_view(),
+            project_summary={**repo.project_view(), "root_path": str(command_context.root_path)},
         )
         command_exec_ms = int((time.perf_counter() - direct_started) * 1000)
 
@@ -474,7 +1153,7 @@ class RunOrchestrator:
                 failures += 1
 
             output_files = self._detect_direct_mode_output_files(
-                context=context,
+                context=command_context,
                 cwd=resolved_cwd,
                 command_text=item.command,
                 stdout=stdout,
@@ -587,11 +1266,6 @@ class RunOrchestrator:
             synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
             if synthesized:
                 assistant_content = synthesized
-        assistant_content = self._append_output_file_tags(assistant_content, output_files_for_response)
-        if failures and tool_summaries:
-            assistant_content += "\n\nExecution summary:\n- " + "\n- ".join(tool_summaries)
-        elif not assistant_content.strip() and tool_summaries:
-            assistant_content = "Execution summary:\n- " + "\n- ".join(tool_summaries)
 
         total_ms = int((time.perf_counter() - run_started) * 1000)
         latency_summary_payload = {
@@ -603,61 +1277,28 @@ class RunOrchestrator:
             "total_ms": total_ms,
         }
 
-        with context.lock:
-            assistant_parts: list[dict[str, Any]] = [{"type": "output_file", "path": path} for path in output_files_for_response[:10]]
-            final_message = repo.create_message(
-                conversation_id,
-                role="assistant",
-                content=assistant_content or "Done.",
-                parts=assistant_parts,
-                parent_message_id=trigger_message_id,
-                metadata={"run_id": run_id},
-            )
-            repo.add_event(
-                "message_finalized",
-                conversation_id=conversation_id,
-                run_id=run_id,
-                payload={"message_id": final_message["id"]},
-            )
-            if failures:
-                repo.update_run(
-                    run_id,
-                    status="failed",
-                    output_summary=f"{len(direct_result.commands)} step(s), {failures} failed",
-                    error="One or more run steps failed",
-                    finished=True,
-                )
-                repo.add_event(
-                    "run_failed",
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    payload={"failures": failures, "latency_ms": latency_summary_payload},
-                )
-            else:
-                repo.update_run(
-                    run_id,
-                    status="done",
-                    output_summary=f"{len(direct_result.commands)} step(s) executed",
-                    finished=True,
-                )
-                repo.add_event(
-                    "run_completed",
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    payload={"steps": len(direct_result.commands), "latency_ms": latency_summary_payload},
-                )
-            repo.add_event(
-                "run_latency_summary",
-                conversation_id=conversation_id,
-                run_id=run_id,
-                payload=latency_summary_payload,
-            )
+        self._finalize_run_result(
+            context=context,
+            repo=repo,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            trigger_message_id=trigger_message_id,
+            assistant_content=assistant_content or "Done.",
+            output_files_for_response=output_files_for_response,
+            failures=failures,
+            tool_summaries=tool_summaries,
+            latency_summary_payload=latency_summary_payload,
+            step_count=len(direct_result.commands),
+            preview_root=preview_root,
+        )
 
     async def _execute_run(self, *, project_id: str, conversation_id: str, run_id: str, trigger_message_id: str) -> None:
         context = self.project_store.get(project_id)
         if context is None:
             return
         repo = ProjectRepository(context)
+        preview_root: Path | None = None
+        command_context: ProjectContext = context
         runtime = self._runtime_config()
         run_started = time.perf_counter()
         execution_mode = runtime.execution_mode if runtime.execution_mode in {"planner", "execute"} else "execute"
@@ -668,6 +1309,14 @@ class RunOrchestrator:
         synthesis_ms = 0
 
         try:
+            try:
+                preview_root = self._prepare_preview_workspace(context, run_id)
+                command_context = self._build_preview_context(context, preview_root)
+            except Exception:
+                logger.exception("Could not prepare preview workspace for run_id=%s; falling back to direct project execution", run_id)
+                preview_root = None
+                command_context = context
+
             with context.lock:
                 repo.update_run(run_id, status="running")
                 repo.add_event(
@@ -703,9 +1352,11 @@ class RunOrchestrator:
                 logger.exception("RAG context preparation failed run_id=%s", run_id)
 
             planner_user_message = self._compose_planner_user_message(trigger_msg, rag_hits=rag_hits)
+            execution_project_summary = {**repo.project_view(), "root_path": str(command_context.root_path)}
             if execution_mode == "execute":
                 await self._execute_direct_mode(
                     context=context,
+                    command_context=command_context,
                     repo=repo,
                     conversation_id=conversation_id,
                     run_id=run_id,
@@ -717,6 +1368,7 @@ class RunOrchestrator:
                     run_started=run_started,
                     scan_ms=scan_ms,
                     search_ms=search_ms,
+                    preview_root=preview_root,
                 )
                 return
             planning_started = time.perf_counter()
@@ -725,7 +1377,7 @@ class RunOrchestrator:
                 user_message=planner_user_message,
                 conversation_history=history,
                 skill_bundle=skills,
-                project_summary=repo.project_view(),
+                project_summary=execution_project_summary,
             )
             planning_ms = int((time.perf_counter() - planning_started) * 1000)
 
@@ -757,7 +1409,7 @@ class RunOrchestrator:
                     user_message=planner_user_message,
                     conversation_history=history,
                     skill_bundle=skills,
-                    project_summary=repo.project_view(),
+                    project_summary=execution_project_summary,
                     primary_timeout_seconds=delayed_timeout,
                     allow_retry=False,
                     retry_timeout_seconds=delayed_timeout,
@@ -818,9 +1470,9 @@ class RunOrchestrator:
                 command: Any,
                 execution_mode: str,
             ) -> dict[str, Any]:
-                command_base_cwd = self._resolve_command_base_cwd(context=context, command_cwd=command.cwd)
+                command_base_cwd = self._resolve_command_base_cwd(context=command_context, command_cwd=command.cwd)
                 baseline = self._capture_output_baseline(
-                    context=context,
+                    context=command_context,
                     cwd=command_base_cwd,
                     command_text=command.cmd,
                 )
@@ -849,7 +1501,7 @@ class RunOrchestrator:
 
                 step_exec_started = time.perf_counter()
                 try:
-                    result = await asyncio.to_thread(self.codex.execute, context, command)
+                    result = await asyncio.to_thread(self.codex.execute, command_context, command)
                     step_exec_ms = int((time.perf_counter() - step_exec_started) * 1000)
                     stderr_excerpt = ((result.stderr or "").strip().splitlines() or [""])[0][:240]
                     stdout_excerpt = ((result.stdout or "").strip().splitlines() or [""])[0][:240]
@@ -866,7 +1518,7 @@ class RunOrchestrator:
                         "execution_mode": execution_mode,
                     }
                     output_files = self._detect_output_files(
-                        context=context,
+                        context=command_context,
                         cwd=Path(result.cwd),
                         command_text=command.cmd,
                         stdout=result.stdout or "",
@@ -1064,19 +1716,13 @@ class RunOrchestrator:
             synthesized = self.planner.synthesize_response(
                 user_message=str(trigger_msg.get("content", "")),
                 planner_text=plan.planner_text,
-                project_summary=repo.project_view(),
+                project_summary=execution_project_summary,
                 tool_results=tool_results_for_response,
                 output_files=output_files_for_response,
             )
             synthesis_ms = int((time.perf_counter() - synthesis_started) * 1000)
             if synthesized:
                 assistant_content = synthesized
-
-            assistant_content = self._append_output_file_tags(assistant_content, output_files_for_response)
-            if failures and tool_summaries:
-                assistant_content += "\n\nExecution summary:\n- " + "\n- ".join(tool_summaries)
-            elif not assistant_content.strip() and tool_summaries:
-                assistant_content = "Execution summary:\n- " + "\n- ".join(tool_summaries)
 
             total_ms = int((time.perf_counter() - run_started) * 1000)
             latency_summary_payload = {
@@ -1088,94 +1734,20 @@ class RunOrchestrator:
                 "total_ms": total_ms,
             }
 
-            with context.lock:
-                assistant_parts: list[dict[str, Any]] = [
-                    {"type": "output_file", "path": path}
-                    for path in output_files_for_response[:10]
-                ]
-                final_message = repo.create_message(
-                    conversation_id,
-                    role="assistant",
-                    content=assistant_content,
-                    parts=assistant_parts,
-                    parent_message_id=trigger_message_id,
-                    metadata={"run_id": run_id},
-                )
-                repo.add_event(
-                    "message_finalized",
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    payload={"message_id": final_message["id"]},
-                )
-
-                if failures:
-                    repo.update_run(
-                        run_id,
-                        status="failed",
-                        output_summary=f"{len(plan.commands)} step(s), {failures} failed",
-                        error="One or more run steps failed",
-                        finished=True,
-                    )
-                    repo.add_event(
-                        "run_failed",
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        payload={
-                            "failures": failures,
-                            "latency_ms": {
-                                "rag_scan": scan_ms,
-                                "rag_search": search_ms,
-                                "planning": planning_ms,
-                                "execution": command_exec_ms,
-                                "synthesis": synthesis_ms,
-                                "total": total_ms,
-                            },
-                        },
-                    )
-                else:
-                    repo.update_run(
-                        run_id,
-                        status="done",
-                        output_summary=f"{len(plan.commands)} step(s) executed",
-                        finished=True,
-                    )
-                    repo.add_event(
-                        "run_completed",
-                        conversation_id=conversation_id,
-                        run_id=run_id,
-                        payload={
-                            "steps": len(plan.commands),
-                            "latency_ms": {
-                                "rag_scan": scan_ms,
-                                "rag_search": search_ms,
-                                "planning": planning_ms,
-                                "execution": command_exec_ms,
-                                "synthesis": synthesis_ms,
-                                "total": total_ms,
-                            },
-                        },
-                    )
-
-                repo.add_event(
-                    "run_latency_summary",
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    payload=latency_summary_payload,
-                )
-
-                logger.info(
-                    "Run latency summary run_id=%s status=%s total_ms=%s planning_ms=%s execution_ms=%s synthesis_ms=%s rag_scan_ms=%s rag_search_ms=%s steps=%s failures=%s",
-                    run_id,
-                    "failed" if failures else "done",
-                    total_ms,
-                    planning_ms,
-                    command_exec_ms,
-                    synthesis_ms,
-                    scan_ms,
-                    search_ms,
-                    len(plan.commands),
-                    failures,
-                )
+            self._finalize_run_result(
+                context=context,
+                repo=repo,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                trigger_message_id=trigger_message_id,
+                assistant_content=assistant_content,
+                output_files_for_response=output_files_for_response,
+                failures=failures,
+                tool_summaries=tool_summaries,
+                latency_summary_payload=latency_summary_payload,
+                step_count=len(plan.commands),
+                preview_root=preview_root,
+            )
 
         except asyncio.CancelledError:
             with context.lock:
@@ -1186,6 +1758,8 @@ class RunOrchestrator:
                     run_id=run_id,
                     payload={"reason": "cancelled"},
                 )
+            if preview_root is not None:
+                self._cleanup_preview_workspace(context, run_id)
             raise
         except Exception as exc:
             with context.lock:
@@ -1202,5 +1776,7 @@ class RunOrchestrator:
                     run_id=run_id,
                     payload={"error": str(exc)},
                 )
+            if preview_root is not None:
+                self._cleanup_preview_workspace(context, run_id)
         finally:
             self._tasks.pop(run_id, None)

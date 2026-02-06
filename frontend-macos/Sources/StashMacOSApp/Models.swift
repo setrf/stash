@@ -20,15 +20,111 @@ struct Conversation: Decodable, Identifiable, Hashable {
     let summary: String?
 }
 
+struct CSVCellChange: Decodable, Hashable, Identifiable {
+    let row: Int
+    let column: Int
+    let old: String
+    let new: String
+
+    var id: String {
+        "\(row):\(column):\(old)->\(new)"
+    }
+}
+
+struct MessagePart: Decodable, Hashable, Identifiable {
+    let type: String
+    let path: String?
+    let fromPath: String?
+    let sourcePath: String?
+    let summary: String?
+    let diff: String?
+    let csvCellChanges: [CSVCellChange]
+
+    var id: String {
+        let base = path ?? fromPath ?? summary ?? type
+        let detail = (summary ?? "") + "|" + String((diff ?? "").prefix(80))
+        return "\(type):\(base):\(detail)"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case path
+        case fromPath
+        case sourcePath
+        case summary
+        case diff
+        case csvCellChanges
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        path = try container.decodeIfPresent(String.self, forKey: .path)
+        fromPath = try container.decodeIfPresent(String.self, forKey: .fromPath)
+        sourcePath = try container.decodeIfPresent(String.self, forKey: .sourcePath)
+        summary = try container.decodeIfPresent(String.self, forKey: .summary)
+        diff = try container.decodeIfPresent(String.self, forKey: .diff)
+        csvCellChanges = try container.decodeIfPresent([CSVCellChange].self, forKey: .csvCellChanges) ?? []
+    }
+}
+
 struct Message: Decodable, Identifiable, Hashable {
     let id: String
     let projectId: String
     let conversationId: String
     let role: String
     let content: String
+    let parts: [MessagePart]
     let parentMessageId: String?
     let sequenceNo: Int
     let createdAt: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case projectId
+        case conversationId
+        case role
+        case content
+        case parts
+        case parentMessageId
+        case sequenceNo
+        case createdAt
+    }
+
+    init(
+        id: String,
+        projectId: String,
+        conversationId: String,
+        role: String,
+        content: String,
+        parts: [MessagePart],
+        parentMessageId: String?,
+        sequenceNo: Int,
+        createdAt: String
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.conversationId = conversationId
+        self.role = role
+        self.content = content
+        self.parts = parts
+        self.parentMessageId = parentMessageId
+        self.sequenceNo = sequenceNo
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        projectId = try container.decode(String.self, forKey: .projectId)
+        conversationId = try container.decode(String.self, forKey: .conversationId)
+        role = try container.decode(String.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        parts = try container.decodeIfPresent([MessagePart].self, forKey: .parts) ?? []
+        parentMessageId = try container.decodeIfPresent(String.self, forKey: .parentMessageId)
+        sequenceNo = try container.decode(Int.self, forKey: .sequenceNo)
+        createdAt = try container.decode(String.self, forKey: .createdAt)
+    }
 }
 
 enum JSONValue: Decodable, Hashable {
@@ -148,7 +244,44 @@ struct RunDetail: Decodable {
     let mode: String
     let outputSummary: String?
     let error: String?
+    let runOutcomeKind: String?
+    let requiresConfirmation: Bool?
+    let changeSetId: String?
+    let changes: [MessagePart]
     let steps: [RunStep]?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case projectId
+        case conversationId
+        case triggerMessageId
+        case status
+        case mode
+        case outputSummary
+        case error
+        case runOutcomeKind
+        case requiresConfirmation
+        case changeSetId
+        case changes
+        case steps
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        projectId = try container.decode(String.self, forKey: .projectId)
+        conversationId = try container.decode(String.self, forKey: .conversationId)
+        triggerMessageId = try container.decode(String.self, forKey: .triggerMessageId)
+        status = try container.decode(String.self, forKey: .status)
+        mode = try container.decode(String.self, forKey: .mode)
+        outputSummary = try container.decodeIfPresent(String.self, forKey: .outputSummary)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        runOutcomeKind = try container.decodeIfPresent(String.self, forKey: .runOutcomeKind)
+        requiresConfirmation = try container.decodeIfPresent(Bool.self, forKey: .requiresConfirmation)
+        changeSetId = try container.decodeIfPresent(String.self, forKey: .changeSetId)
+        changes = try container.decodeIfPresent([MessagePart].self, forKey: .changes) ?? []
+        steps = try container.decodeIfPresent([RunStep].self, forKey: .steps)
+    }
 }
 
 struct RunTodo: Identifiable, Hashable {

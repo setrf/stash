@@ -62,6 +62,9 @@ final class AppViewModel: ObservableObject {
     @Published var runPlannerPreview: String?
     @Published var runTodos: [RunTodo] = []
     @Published var runFeedbackEvents: [RunFeedbackEvent] = []
+    @Published var pendingRunConfirmationID: String?
+    @Published var pendingRunOutcomeKind: String?
+    @Published var pendingRunChanges: [MessagePart] = []
     @Published var mentionSuggestions: [FileItem] = []
     @Published var mentionedFilePaths: [String] = []
     @Published var setupStatus: RuntimeSetupStatus?
@@ -125,6 +128,10 @@ final class AppViewModel: ObservableObject {
         CodexModelPreset(value: "gpt-5.3-codex-high", label: "GPT-5.3 Codex (high)", hint: "Best quality"),
         CodexModelPreset(value: "", label: "CLI default (latest)", hint: "Use your Codex CLI default"),
     ]
+
+    var hasPendingRunConfirmation: Bool {
+        pendingRunConfirmationID != nil && !pendingRunChanges.isEmpty
+    }
 
     init(initialProjectRootURL: URL? = nil, initialBackendURL: URL? = nil) {
         self.initialProjectRootURL = initialProjectRootURL
@@ -1125,6 +1132,22 @@ final class AppViewModel: ObservableObject {
         return error.localizedDescription
     }
     func presentProjectPicker() {
+        presentProjectSelectionPanel(
+            canCreateDirectories: false,
+            prompt: "Grant Access",
+            message: "Choose a project folder for Stash. This grants macOS folder access and saves it for future launches."
+        )
+    }
+
+    func presentProjectCreator() {
+        presentProjectSelectionPanel(
+            canCreateDirectories: true,
+            prompt: "Create / Open",
+            message: "Create a new project folder or choose an existing one to open in Stash."
+        )
+    }
+
+    private func presentProjectSelectionPanel(canCreateDirectories: Bool, prompt: String, message: String) {
         guard !isPresentingProjectPicker else { return }
         isPresentingProjectPicker = true
         defer { isPresentingProjectPicker = false }
@@ -1133,9 +1156,9 @@ final class AppViewModel: ObservableObject {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = false
-        panel.prompt = "Grant Access"
-        panel.message = "Choose a project folder for Stash. This grants macOS folder access and saves it for future launches."
+        panel.canCreateDirectories = canCreateDirectories
+        panel.prompt = prompt
+        panel.message = message
         panel.directoryURL = projectRootURL
 
         if panel.runModal() == .OK, let url = panel.url {
@@ -1898,6 +1921,87 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func clearPendingRunConfirmation() {
+        pendingRunConfirmationID = nil
+        pendingRunOutcomeKind = nil
+        pendingRunChanges = []
+    }
+
+    private func setPendingRunConfirmation(runID: String, run: RunDetail) {
+        pendingRunConfirmationID = runID
+        pendingRunOutcomeKind = run.runOutcomeKind
+        pendingRunChanges = run.changes
+    }
+
+    private func changedPathsForAutoOpen(_ changes: [MessagePart]) -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        for change in changes {
+            let type = change.type.lowercased()
+            guard ["edit_file", "output_file", "rename_file"].contains(type) else { continue }
+            guard let path = change.path?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty else { continue }
+            let lowered = path.lowercased()
+            if seen.contains(lowered) { continue }
+            seen.insert(lowered)
+            ordered.append(path)
+        }
+        return ordered
+    }
+
+    func applyPendingRunChanges() async {
+        guard let projectID = project?.id else {
+            errorText = "Open a project first"
+            return
+        }
+        guard let runID = pendingRunConfirmationID else {
+            errorText = "No pending run to apply"
+            return
+        }
+
+        let changesToOpen = pendingRunChanges
+        do {
+            _ = try await client.applyRun(projectID: projectID, runID: runID)
+            clearPendingRunConfirmation()
+            await refreshFiles(force: true, triggerChangeIndex: false)
+            for path in changedPathsForAutoOpen(changesToOpen).prefix(6) {
+                openFile(relativePath: path, mode: .pinned)
+            }
+            await autoIndexCurrentProject(fullScan: false, statusText: "Applied changes. Re-indexing...")
+            if let conversationID = selectedConversationID {
+                await loadMessages(conversationID: conversationID)
+            }
+            runStatusText = "Changes applied"
+            appendRunFeedbackEvent(type: "status", title: "Changes applied")
+            errorText = nil
+        } catch {
+            errorText = "Could not apply changes: \(error.localizedDescription)"
+        }
+    }
+
+    func discardPendingRunChanges() async {
+        guard let projectID = project?.id else {
+            errorText = "Open a project first"
+            return
+        }
+        guard let runID = pendingRunConfirmationID else {
+            errorText = "No pending run to discard"
+            return
+        }
+
+        do {
+            _ = try await client.discardRun(projectID: projectID, runID: runID)
+            clearPendingRunConfirmation()
+            if let conversationID = selectedConversationID {
+                await loadMessages(conversationID: conversationID)
+            }
+            runStatusText = "Changes discarded"
+            appendRunFeedbackEvent(type: "status", title: "Changes discarded")
+            errorText = nil
+        } catch {
+            errorText = "Could not discard changes: \(error.localizedDescription)"
+        }
+    }
+
     private func appendRunFeedbackEvent(
         type: String,
         title: String,
@@ -2068,14 +2172,39 @@ final class AppViewModel: ObservableObject {
         case "run_completed":
             runThinkingText = nil
             runPlanningText = "Run completed."
+            clearPendingRunConfirmation()
             appendRunFeedbackEvent(type: "status", title: "Run completed", detail: nil, timestampISO: event.ts)
 
         case "run_failed":
             runThinkingText = nil
             runPlanningText = "Run failed."
+            clearPendingRunConfirmation()
             let failures = event.payload["failures"]?.intValue
             let detail = failures != nil ? "\(failures ?? 0) step(s) failed" : nil
             appendRunFeedbackEvent(type: "error", title: "Run failed", detail: detail, timestampISO: event.ts)
+
+        case "run_confirmation_required":
+            runThinkingText = nil
+            runPlanningText = "Review changes and apply or discard."
+            if pendingRunConfirmationID == nil {
+                pendingRunConfirmationID = expectedRunID
+            }
+            appendRunFeedbackEvent(
+                type: "status",
+                title: "Confirmation required",
+                detail: event.payload["outcome_kind"]?.stringValue,
+                timestampISO: event.ts
+            )
+
+        case "run_applied":
+            clearPendingRunConfirmation()
+            runPlanningText = "Changes applied."
+            appendRunFeedbackEvent(type: "status", title: "Changes applied", detail: nil, timestampISO: event.ts)
+
+        case "run_discarded":
+            clearPendingRunConfirmation()
+            runPlanningText = "Changes discarded."
+            appendRunFeedbackEvent(type: "status", title: "Changes discarded", detail: nil, timestampISO: event.ts)
 
         case "run_latency_summary":
             let planning = event.payload["planning_ms"]?.intValue ?? 0
@@ -2094,6 +2223,7 @@ final class AppViewModel: ObservableObject {
         case "run_cancelled":
             runThinkingText = nil
             runPlanningText = "Run cancelled."
+            clearPendingRunConfirmation()
             appendRunFeedbackEvent(type: "status", title: "Run cancelled", detail: nil, timestampISO: event.ts)
 
         default:
@@ -2148,6 +2278,7 @@ final class AppViewModel: ObservableObject {
         activeRunID = nil
         runInProgress = false
         runStatusText = nil
+        clearPendingRunConfirmation()
         resetRunFeedback(clearEvents: true)
     }
 
@@ -2179,6 +2310,7 @@ final class AppViewModel: ObservableObject {
         }
 
         let mentionParts = buildMentionParts(from: content)
+        clearPendingRunConfirmation()
         resetRunFeedback(clearEvents: true)
         runThinkingText = "Thinking and planning..."
         runPlanningText = "Waiting for planner..."
@@ -2190,6 +2322,7 @@ final class AppViewModel: ObservableObject {
             conversationId: conversationID,
             role: "user",
             content: content,
+            parts: [],
             parentMessageId: nil,
             sequenceNo: (messages.last?.sequenceNo ?? 0) + 1,
             createdAt: ISO8601DateFormatter().string(from: Date())
@@ -2257,7 +2390,25 @@ final class AppViewModel: ObservableObject {
                         self.updateRunFeedback(run: run)
                     }
 
-                    if ["done", "failed", "cancelled"].contains(run.status.lowercased()) {
+                    let status = run.status.lowercased()
+                    if status == "awaiting_confirmation" {
+                        await MainActor.run {
+                            self.setPendingRunConfirmation(runID: runID, run: run)
+                            self.runStatusText = "Awaiting confirmation"
+                            self.runThinkingText = nil
+                            self.runPlanningText = "Review changes and apply or discard."
+                            self.appendRunFeedbackEvent(type: "status", title: "Awaiting confirmation")
+                        }
+                        if self.selectedConversationID == conversationID {
+                            await self.loadMessages(conversationID: conversationID)
+                        }
+                        return
+                    }
+
+                    if ["done", "failed", "cancelled"].contains(status) {
+                        await MainActor.run {
+                            self.clearPendingRunConfirmation()
+                        }
                         await MainActor.run {
                             self.runStatusText = run.status.uppercased() + (run.error.map { ": \($0)" } ?? "")
                         }
@@ -2317,7 +2468,23 @@ final class AppViewModel: ObservableObject {
 
             do {
                 let finalRun = try await self.client.run(projectID: projectID, runID: runID)
-                if ["done", "failed", "cancelled"].contains(finalRun.status.lowercased()) {
+                let finalStatus = finalRun.status.lowercased()
+                if finalStatus == "awaiting_confirmation" {
+                    await MainActor.run {
+                        self.setPendingRunConfirmation(runID: runID, run: finalRun)
+                        self.runStatusText = "Awaiting confirmation"
+                        self.runThinkingText = nil
+                        self.runPlanningText = "Review changes and apply or discard."
+                    }
+                    if self.selectedConversationID == conversationID {
+                        await self.loadMessages(conversationID: conversationID)
+                    }
+                    return
+                }
+                if ["done", "failed", "cancelled"].contains(finalStatus) {
+                    await MainActor.run {
+                        self.clearPendingRunConfirmation()
+                    }
                     await MainActor.run {
                         self.runStatusText = finalRun.status.uppercased() + (finalRun.error.map { ": \($0)" } ?? "")
                     }

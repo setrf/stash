@@ -45,28 +45,16 @@ struct ExplorerPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            projectSwitcherHeader
+
+            HStack(spacing: 8) {
                 Text("Explorer")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundStyle(CodexTheme.textSecondary)
 
                 Spacer()
 
-                Picker("View", selection: Binding(
-                    get: { viewModel.explorerMode },
-                    set: { viewModel.setExplorerMode($0) }
-                )) {
-                    ForEach(ExplorerMode.allCases, id: \.self) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 170)
-            }
-
-            HStack(spacing: 8) {
-                TextField("Filter files", text: $viewModel.fileQuery)
-                    .textFieldStyle(.roundedBorder)
+                explorerModeSwitch
 
                 Button {
                     createFolderRequest = FolderTargetRequest(
@@ -75,10 +63,52 @@ struct ExplorerPanel: View {
                     createFolderName = ""
                 } label: {
                     Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                        .frame(width: 24, height: 24)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.white)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(CodexTheme.border, lineWidth: 1)
+                )
                 .help("Create folder")
             }
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(CodexTheme.textSecondary)
+
+                TextField("Filter files", text: $viewModel.fileQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+
+                if !viewModel.fileQuery.isEmpty {
+                    Button {
+                        viewModel.fileQuery = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(CodexTheme.textSecondary.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(CodexTheme.border, lineWidth: 1)
+            )
 
             if viewModel.explorerMode == .tree {
                 treeView
@@ -152,6 +182,104 @@ struct ExplorerPanel: View {
         } message: { item in
             Text("\(item.name) will be moved to Trash.")
         }
+    }
+
+    private var projectSwitcherHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(CodexTheme.accent)
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(CodexTheme.accent.opacity(0.12))
+                    )
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(viewModel.project?.name ?? "No Project")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(CodexTheme.textPrimary)
+                        .lineLimit(1)
+                    Text(viewModel.projectRootURL?.path ?? "")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(CodexTheme.textSecondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                sidebarIconButton(icon: "arrow.left.arrow.right") {
+                    viewModel.presentProjectPicker()
+                }
+                .help("Switch project")
+
+                sidebarIconButton(icon: "plus") {
+                    viewModel.presentProjectCreator()
+                }
+                .help("Create / open project")
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(CodexTheme.border, lineWidth: 1)
+        )
+    }
+
+    private var explorerModeSwitch: some View {
+        HStack(spacing: 2) {
+            modeSwitchButton(icon: "list.bullet.indent", mode: .tree)
+            modeSwitchButton(icon: "square.grid.2x2", mode: .folders)
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(CodexTheme.border, lineWidth: 1)
+        )
+    }
+
+    private func modeSwitchButton(icon: String, mode: ExplorerMode) -> some View {
+        let selected = viewModel.explorerMode == mode
+        return Button {
+            viewModel.setExplorerMode(mode)
+        } label: {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(selected ? CodexTheme.textPrimary : CodexTheme.textSecondary)
+                .frame(width: 26, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(selected ? CodexTheme.canvas : Color.clear)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func sidebarIconButton(icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(CodexTheme.textSecondary)
+                .frame(width: 24, height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(CodexTheme.panel)
+                )
+        }
+        .buttonStyle(.plain)
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(CodexTheme.border, lineWidth: 1)
+        )
     }
 
     private var treeView: some View {
