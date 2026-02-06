@@ -5,11 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FRONTEND_PROJECT_PATH="${STASH_FRONTEND_PROJECT_PATH:-}"
 FRONTEND_DIR="$ROOT_DIR/frontend-macos"
 FRONTEND_LAUNCH_MODE="${STASH_FRONTEND_LAUNCH_MODE:-run}"
+RUN_MAIN_APP="${STASH_RUN_MAIN_APP:-1}"
+RUN_OVERLAY="${STASH_RUN_OVERLAY:-1}"
 
 cleanup() {
-  if [[ -n "${FRONTEND_PID:-}" ]]; then
-    kill "$FRONTEND_PID" >/dev/null 2>&1 || true
-    wait "$FRONTEND_PID" >/dev/null 2>&1 || true
+  if [[ -n "${FRONTEND_APP_PID:-}" ]]; then
+    kill "$FRONTEND_APP_PID" >/dev/null 2>&1 || true
+    wait "$FRONTEND_APP_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${FRONTEND_OVERLAY_PID:-}" ]]; then
+    kill "$FRONTEND_OVERLAY_PID" >/dev/null 2>&1 || true
+    wait "$FRONTEND_OVERLAY_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n "${BACKEND_PID:-}" ]]; then
     kill "$BACKEND_PID" >/dev/null 2>&1 || true
@@ -42,13 +48,31 @@ else
       echo "Falling back to opening project/package."
       FRONTEND_LAUNCH_MODE="open"
     else
-      echo "Launching frontend app from Swift package: $FRONTEND_PACKAGE"
-      (
-        cd "$FRONTEND_DIR"
-        swift run
-      ) &
-      FRONTEND_PID=$!
-      wait "$FRONTEND_PID"
+      if [ "$RUN_MAIN_APP" = "1" ]; then
+        echo "Launching frontend app product: StashMacOSApp"
+        (
+          cd "$FRONTEND_DIR"
+          swift run StashMacOSApp
+        ) &
+        FRONTEND_APP_PID=$!
+      fi
+      if [ "$RUN_OVERLAY" = "1" ]; then
+        echo "Launching overlay product: StashOverlay"
+        (
+          cd "$FRONTEND_DIR"
+          swift run StashOverlay
+        ) &
+        FRONTEND_OVERLAY_PID=$!
+      fi
+      if [ "$RUN_MAIN_APP" != "1" ] && [ "$RUN_OVERLAY" != "1" ]; then
+        echo "No frontend products selected. Set STASH_RUN_MAIN_APP=1 and/or STASH_RUN_OVERLAY=1."
+        wait "$BACKEND_PID"
+      fi
+      if [[ -n "${FRONTEND_APP_PID:-}" ]]; then
+        wait "$FRONTEND_APP_PID"
+      elif [[ -n "${FRONTEND_OVERLAY_PID:-}" ]]; then
+        wait "$FRONTEND_OVERLAY_PID"
+      fi
       exit 0
     fi
   fi

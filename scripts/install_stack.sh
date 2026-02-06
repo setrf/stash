@@ -5,13 +5,37 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend-service"
 VENV_DIR="$ROOT_DIR/.venv"
 FRONTEND_CONFIG_PATH="${STASH_FRONTEND_CONFIG_PATH:-}"
+PYTHON_BIN="${STASH_PYTHON_BIN:-}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "python3 is required" >&2
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3.11 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.11"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  else
+    echo "python3.11 (or python3) is required" >&2
+    exit 1
+  fi
+fi
+
+PYTHON_MAJOR_MINOR="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+if [ "$PYTHON_MAJOR_MINOR" != "3.11" ]; then
+  echo "Python 3.11 is required, but $PYTHON_BIN resolves to $PYTHON_MAJOR_MINOR." >&2
+  echo "Install python3.11 or set STASH_PYTHON_BIN to a Python 3.11 executable." >&2
   exit 1
 fi
 
-python3 -m venv "$VENV_DIR"
+if [ -d "$VENV_DIR" ]; then
+  VENV_PY="$VENV_DIR/bin/python"
+  if [ -x "$VENV_PY" ]; then
+    VENV_MAJOR_MINOR="$("$VENV_PY" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+    if [ "$VENV_MAJOR_MINOR" != "3.11" ]; then
+      rm -rf "$VENV_DIR"
+    fi
+  fi
+fi
+
+"$PYTHON_BIN" -m venv "$VENV_DIR"
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
