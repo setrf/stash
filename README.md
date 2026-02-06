@@ -1,81 +1,44 @@
 # Stash
 
-Stash is a macOS menu bar app that lets you quickly capture PDFs, notes, questions, and highlighted text into **Projects**, then generates **grounded insights**, **follow‑up questions**, and **answers** using OpenAI’s Responses API with File Search (vector stores). It is **BYOK (bring your own OpenAI API key)** for the MVP and stores your originals and derived artifacts locally, with per‑project control over what’s uploaded.
+Stash is a local-first macOS coding assistant with:
 
-## Why Stash
-- Capture becomes effortless.
-- Project context becomes coherent.
-- Answers are grounded in your materials.
-- Insight generation happens automatically, but stays controllable.
+- A local backend service (`backend-service/`)
+- A main workspace app (`StashMacOSApp`)
+- A floating overlay app (`StashOverlay`)
 
-## MVP Scope
-- macOS menu bar app with an always‑on‑top overlay
-- Project creation and fast Project switching
-- Drag‑and‑drop PDFs into the overlay
-- Quick note / question input
-- Capture selected text via “save clipboard” hotkey
-- Automatic processing on new inputs (configurable)
-- Project‑scoped Q&A chat
-- Project window to browse inputs, outputs, and activity
-- Feedback on outputs (thumbs up/down)
-- Settings: API key, per‑project upload toggle, concurrency, notifications
+The backend is the source of truth for project/session state, and both frontend surfaces sync through it.
 
-## Core Objects
-- **Projects**: the primary container
-- **Inputs**: PDFs, notes, questions, snippets
-- **Outputs**: brief, insights, open questions, suggested questions, action items, answers
-- **Runs**: background jobs that ingest and generate outputs
+## What Is Implemented
 
-## High‑Level Architecture
-- **UI (SwiftUI/AppKit)**: menu bar, overlay, Projects window
-- **Local data layer**: SQLite or Core Data
-- **File storage**: `~/Library/Application Support/Stash/Projects/<project_id>/`
-- **Background worker**: PDF extraction, chunking, indexing, Responses calls
-- **OpenAI stack**: Responses API + File Search (vector stores), optional Agents SDK
+- Per-project local state in `PROJECT_ROOT/.stash/`
+- SQLite-backed conversations/messages/runs/steps/events
+- Local indexing + retrieval with watcher-driven incremental updates
+- Run orchestration with planning/execution/confirmation phases
+- Apply/discard flow for proposed filesystem changes
+- Empty-chat quick actions (exactly 3)
+- Active project sync across workspace + overlay via backend runtime config
+- Chat deletion (conversation + related messages/runs/steps/events cleanup)
 
-## Output Expectations (Structured)
-- **Project brief**: summary, objectives, constraints, stakeholders, assumptions, unknowns
-- **Key insights**: statements with confidence + evidence
-- **Open questions**: grouped by theme
-- **Suggested next questions**: “ask this next” list
-- **Action items**: decisions, next steps, agenda
-- **Q&A answers**: grounded answer + sources + missing info
+## Repository Layout
 
-## Principles
-- Local‑first: originals and outputs stored locally
-- Grounded: answers only from project materials
-- Transparent: clear processing and upload controls
-- Fast: overlay appears instantly, results stream quickly
+- `backend-service/`: FastAPI backend + tests
+- `frontend-macos/`: Swift package with workspace and overlay executables
+- `scripts/`: install/run/test helpers
+- `docs/`: integration and installer docs
 
-## Status
-Backend foundation is now implemented under `backend-service/`:
+## Prerequisites
 
-- FastAPI local service on `localhost`
-- Folder-scoped project state in `.stash/` for portable resume/history
-- SQLite metadata + conversations/runs/events
-- Local vector indexing/search
-- Background file watching/indexing
-- Tagged Codex command execution in controlled worktrees
-- Context-aware empty-chat quick actions (3 suggestions, local-fast then indexed+AI refinement)
+- macOS 14+
+- Xcode Command Line Tools (`xcode-select --install`)
+- `swift` in `PATH`
+- `python3` in `PATH` and version `>=3.11`
 
-See `backend-service/README.md` for setup and API usage.
+Important: `backend-service/pyproject.toml` requires Python `>=3.11`.  
+`scripts/install_stack.sh` uses `python3`, so your default `python3` must point to 3.11+.
 
-## Context-Aware Empty Chat Actions
+## Quick Start
 
-When a conversation is empty, Stash now shows exactly 3 quick actions in the chat panel:
-
-- First pass: local filename/type heuristics for fast suggestions
-- Refinement: indexed context + AI/domain classification after indexing becomes available
-- Tap behavior: prefill composer only (no auto-send)
-
-Current domain families:
-- Legal
-- Accounting / HR / Tax
-- Markets / Stock Finance
-- Personal Budgeting
-- General fallback
-
-## One Install For Frontend + Backend
+### 1) Install backend environment
 
 From repo root:
 
@@ -83,43 +46,73 @@ From repo root:
 ./scripts/install_stack.sh
 ```
 
-This does a single local setup for the stack:
+If default `python3` is below 3.11:
 
-- Creates `.venv/`
-- Installs backend dependencies
-- Installs required runtime tools (including `uv`) and document packages (including `pypdf`) into the backend environment
-- Uses app-managed runtime configuration (no `.env` setup required)
-- Optionally writes frontend config when `STASH_FRONTEND_CONFIG_PATH` is set
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e backend-service
+pip install "uv>=0.4.30" "pypdf>=4.2.0"
+```
 
-## Install Desktop App From Scratch (macOS)
+### 2) Start backend
 
-Use this when you want a local `.app` bundle (menu bar overlay + workspace window) instead of running backend/frontend in separate terminals.
-This is the recommended local setup.
+```bash
+./scripts/run_backend.sh
+```
 
-Prerequisites:
-- macOS 14+
-- Xcode Command Line Tools (`xcode-select --install`)
-- `python3` and `swift` available in `PATH`
+Backend URL: `http://127.0.0.1:8765`
 
-Clean install (from repo root):
+### 3) Start frontend app(s)
+
+Workspace app:
+
+```bash
+cd frontend-macos
+swift run StashMacOSApp
+```
+
+Overlay app:
+
+```bash
+cd frontend-macos
+swift run StashOverlay
+```
+
+If you want both workspace + overlay running at once, start them in separate terminals (with backend already running).
+
+## One-Command Launchers
+
+From repo root:
+
+```bash
+./scripts/run_stack.sh
+./scripts/run_everything.sh
+```
+
+- `run_stack.sh` starts backend and launches one frontend product.
+- Default frontend product is `StashMacOSApp`.
+- To launch overlay instead:
+
+```bash
+STASH_FRONTEND_PRODUCT=StashOverlay ./scripts/run_stack.sh
+```
+
+- `run_everything.sh` wraps install+run behavior:
+  - `--install`: force install first
+  - `--skip-install`: skip install
+
+## Desktop App Bundle
+
+Install:
 
 ```bash
 ./scripts/desktop/install_desktop_app.sh
-```
-
-What this installer does:
-- Creates a dedicated backend runtime at `~/Library/Application Support/StashLocal/runtime/.venv`
-- Installs backend package and runtime tools (including `uv` and `pypdf`)
-- Builds frontend release binaries (`StashMacOSApp` and `StashOverlay`)
-- Installs `Stash Local.app` to `~/Desktop` by default
-
-Launch the app:
-
-```bash
 open "$HOME/Desktop/Stash Local.app"
 ```
 
-Verify backend/frontend logs while running:
+Runtime logs:
 
 ```bash
 tail -f "$HOME/Library/Logs/StashLocal/backend.log"
@@ -127,81 +120,53 @@ tail -f "$HOME/Library/Logs/StashLocal/frontend.log"
 tail -f "$HOME/Library/Logs/StashLocal/overlay.log"
 ```
 
-Optional installer overrides:
+See `docs/DESKTOP_INSTALLER.md` for overrides and packaging details.
+
+## Testing
+
+Backend unit tests:
 
 ```bash
-STASH_DESKTOP_TARGET_DIR="/Applications" \
-STASH_DESKTOP_APP_NAME="Stash Local.app" \
-STASH_BACKEND_URL="http://127.0.0.1:8765" \
-STASH_CODEX_MODE="cli" \
-./scripts/desktop/install_desktop_app.sh
+source .venv/bin/activate
+PYTHONPATH=backend-service pytest -q backend-service/tests
 ```
 
-Reinstall after updates:
+Backend smoke test:
 
 ```bash
-./scripts/desktop/install_desktop_app.sh
-pkill -f "Stash Local.app/Contents/MacOS/Stash Local" || true
-open "$HOME/Desktop/Stash Local.app"
-```
-
-Useful logs:
-- `~/Library/Logs/StashLocal/backend.log`
-- `~/Library/Logs/StashLocal/frontend.log`
-- `~/Library/Logs/StashLocal/overlay.log`
-
-## One Command To Run Everything
-
-From repo root:
-
-```bash
-./scripts/run_everything.sh
-```
-
-This single command:
-- Runs install automatically if `.venv/` does not exist
-- Starts backend + frontend stack
-
-Optional flags:
-- `--install` force reinstall before run
-- `--skip-install` skip install and only run
-
-If you are one level above the repo (`New project/`), use:
-
-```bash
-./run_stash.sh
-```
-
-Run commands:
-
-```bash
-./scripts/run_backend.sh
-./scripts/run_stack.sh
-./scripts/run_everything.sh
 ./scripts/smoke_test_backend.sh
+```
+
+Backend Codex CLI integration test (mocked codex binary):
+
+```bash
 ./scripts/integration_test_codex_cli_mock.sh
 ```
 
-Equivalent `make` targets:
+Frontend tests:
 
 ```bash
-make install
-make run-backend
-make run-stack
-make run-everything
-make smoke-test
-make integration-test-codex-cli
-make install-desktop
+cd frontend-macos
+swift test
 ```
 
-Frontend run/integration notes:
-- `docs/FRONTEND_BACKEND_RUN.md`
+## Troubleshooting
+
+- Backend fails during install with Python version error:
+  - Verify `python3 --version` is 3.11+ or create `.venv` manually with `python3.11`.
+- Overlay is not visible:
+  - `run_stack.sh` launches `StashMacOSApp` by default, not overlay.
+  - Run `swift run StashOverlay` directly, or use `STASH_FRONTEND_PRODUCT=StashOverlay`.
+- Runs do not execute through Codex:
+  - Verify CLI auth: `codex login status`.
+
+## Additional Docs
+
+- `backend-service/README.md`
 - `frontend-macos/README.md`
+- `docs/FRONTEND_BACKEND_RUN.md`
 - `docs/DESKTOP_INSTALLER.md`
 
-Codex requirement:
-- Run `codex login status` once before using chat runs so planner/executor can use local Codex CLI.
-- Open **AI Setup** in the frontend to configure planner mode and optional OpenAI API fallback.
-
 ## License
+
 TBD
