@@ -154,6 +154,23 @@ class SearchResponse(BaseModel):
     hits: list[SearchHit]
 
 
+class QuickActionItem(BaseModel):
+    id: str
+    label: str
+    prompt: str
+    category: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str | None = None
+
+
+class QuickActionsResponse(BaseModel):
+    project_id: str
+    actions: list[QuickActionItem] = Field(default_factory=list)
+    source: str
+    indexed_file_count: int = 0
+    generated_at: str
+
+
 class HistorySearchRequest(BaseModel):
     query: str = Field(min_length=1)
     limit: int = Field(default=20, ge=1, le=100)

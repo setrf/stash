@@ -56,8 +56,24 @@ Backend foundation is now implemented under `backend-service/`:
 - Local vector indexing/search
 - Background file watching/indexing
 - Tagged Codex command execution in controlled worktrees
+- Context-aware empty-chat quick actions (3 suggestions, local-fast then indexed+AI refinement)
 
 See `backend-service/README.md` for setup and API usage.
+
+## Context-Aware Empty Chat Actions
+
+When a conversation is empty, Stash now shows exactly 3 quick actions in the chat panel:
+
+- First pass: local filename/type heuristics for fast suggestions
+- Refinement: indexed context + AI/domain classification after indexing becomes available
+- Tap behavior: prefill composer only (no auto-send)
+
+Current domain families:
+- Legal
+- Accounting / HR / Tax
+- Markets / Stock Finance
+- Personal Budgeting
+- General fallback
 
 ## One Install For Frontend + Backend
 

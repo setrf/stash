@@ -41,6 +41,20 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private struct DomainQuickActionSpec {
+        let category: String
+        let label: String
+        let prompt: String
+        let keywords: [String]
+    }
+
+    private struct GeneralQuickActionSpec {
+        let id: String
+        let label: String
+        let prompt: String
+        let reason: String
+    }
+
     @Published var backendConnected = false
     @Published var backendStatusText = "Backend offline"
 
@@ -64,6 +78,13 @@ final class AppViewModel: ObservableObject {
     @Published var isSending = false
     @Published var runStatusText: String?
     @Published var runInProgress = false
+    @Published var runCurrentPhase: String?
+    @Published var runPhaseLabel: String?
+    @Published var runPhaseIndex = 0
+    @Published var runPhaseTotal = 0
+    @Published var runProgressCurrentStep = 0
+    @Published var runProgressTotalSteps = 0
+    @Published var runProgressCompletedSteps = 0
     @Published var indexingStatusText: String?
     @Published var runThinkingText: String?
     @Published var runPlanningText: String?
@@ -77,6 +98,10 @@ final class AppViewModel: ObservableObject {
     @Published var externallyChangedBufferPaths: Set<String> = []
     @Published var mentionSuggestions: [FileItem] = []
     @Published var mentionedFilePaths: [String] = []
+    @Published var quickActions: [QuickActionItemPayload] = []
+    @Published var quickActionsSource: String?
+    @Published var quickActionsLoading = false
+    @Published var composerFocusToken = 0
     @Published var setupStatus: RuntimeSetupStatus?
     @Published var runtimeConfig: RuntimeConfigPayload?
     @Published var setupSheetPresented = false
@@ -100,6 +125,7 @@ final class AppViewModel: ObservableObject {
     private var runEventStreamTask: Task<Void, Never>?
     private var filePollTask: Task<Void, Never>?
     private var indexStatusClearTask: Task<Void, Never>?
+    private var quickActionsIndexMonitorTask: Task<Void, Never>?
     private var lastFileSignature: Int?
     private var lastFileChangeIndexRequestAt = Date.distantPast
     private var didBootstrap = false
@@ -121,10 +147,59 @@ final class AppViewModel: ObservableObject {
     private let onboardingCompletedKey = "stash.onboardingCompletedV1"
     private let workspaceSessionPrefix = "stash.workspace.session."
     private let recommendedCodexModel = "gpt-5.3-codex"
+    private let quickActionDomainThreshold: Double = 0.35
+    private let quickActionDomainSpecs: [DomainQuickActionSpec] = [
+        DomainQuickActionSpec(
+            category: "legal",
+            label: "Review Legal Docs",
+            prompt: "Review the legal documents in this project, summarize obligations, deadlines, termination clauses, and key risks in a concise memo.",
+            keywords: ["contract", "agreement", "nda", "msa", "sow", "terms", "policy", "clause", "lease"]
+        ),
+        DomainQuickActionSpec(
+            category: "accounting_hr_tax",
+            label: "Organize Accounting",
+            prompt: "Categorize receipts, tax, and payroll documents, summarize totals and missing items, and produce a clean month-by-month accounting summary.",
+            keywords: ["receipt", "invoice", "tax", "w2", "1099", "payroll", "reimbursement", "expense", "benefits"]
+        ),
+        DomainQuickActionSpec(
+            category: "markets_finance",
+            label: "Analyze Markets",
+            prompt: "Analyze stock and portfolio documents, summarize positions, major risks, upcoming earnings/events, and recommended follow-up checks.",
+            keywords: ["stock", "ticker", "portfolio", "trade", "earnings", "10-k", "10q", "balance-sheet"]
+        ),
+        DomainQuickActionSpec(
+            category: "personal_budget",
+            label: "Plan Budget",
+            prompt: "Build or update a personal budget plan from these docs, including spending categories, savings targets, and debt payoff priorities.",
+            keywords: ["budget", "spending", "savings", "debt", "loan", "credit-card", "net-worth"]
+        ),
+    ]
+    private let quickActionGeneralSpecs: [GeneralQuickActionSpec] = [
+        GeneralQuickActionSpec(
+            id: "qa-general-1",
+            label: "Summarize Project Docs",
+            prompt: "Summarize the most important documents in this project and propose a prioritized action plan.",
+            reason: "General project triage."
+        ),
+        GeneralQuickActionSpec(
+            id: "qa-general-2",
+            label: "Find Key Deadlines",
+            prompt: "Scan project files for deadlines, due dates, and upcoming actions, then output a prioritized checklist.",
+            reason: "General deadline extraction."
+        ),
+        GeneralQuickActionSpec(
+            id: "qa-general-3",
+            label: "Create Action Plan",
+            prompt: "Create a practical next-step plan based on these files, including quick wins and high-risk follow-ups.",
+            reason: "General next-step planning."
+        ),
+    ]
     private let initialProjectRootURL: URL?
     private var activeSecurityScopedProjectURL: URL?
     private var activeRunID: String?
     private var lastRunEventID = 0
+    private var lastFeedbackEventKey: String?
+    private var lastFeedbackEventAt = Date.distantPast
     private var autosaveTasksByPath: [String: Task<Void, Never>] = [:]
     private var pendingSingleClickTask: Task<Void, Never>?
     private var pendingSingleClickPath: String?
@@ -180,18 +255,44 @@ final class AppViewModel: ObservableObject {
             }
             return "Review pending changes before applying."
         case .running:
+            if let phaseSummary = runPhaseSummaryText {
+                return phaseSummary
+            }
             return runThinkingText ?? runPlanningText ?? runStatusText ?? "Working on your request..."
         case .failed:
+            if let phaseSummary = runPhaseSummaryText {
+                return phaseSummary
+            }
             return runStatusText ?? runPlanningText ?? errorText ?? "Run failed."
         case .done:
+            if let phaseSummary = runPhaseSummaryText {
+                return phaseSummary
+            }
             return runStatusText ?? runPlanningText ?? "Run complete."
         case .idle:
             return "Ready"
         }
     }
 
+    var runProgressBadgeText: String? {
+        guard runProgressTotalSteps > 0 else { return nil }
+        let current = max(runProgressCurrentStep, runProgressCompletedSteps)
+        guard current > 0 else { return nil }
+        return "Step \(min(current, runProgressTotalSteps))/\(runProgressTotalSteps)"
+    }
+
+    private var runPhaseSummaryText: String? {
+        guard let phaseLabel = runPhaseLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !phaseLabel.isEmpty else {
+            return nil
+        }
+        if let badge = runProgressBadgeText, runCurrentPhase?.lowercased() == "executing" {
+            return "\(phaseLabel) • \(badge)"
+        }
+        return phaseLabel
+    }
+
     var hasRunDetails: Bool {
-        runPlannerPreview != nil || !runTodos.isEmpty || !runFeedbackEvents.isEmpty
+        !runFeedbackEvents.isEmpty
     }
 
     init(initialProjectRootURL: URL? = nil, initialBackendURL: URL? = nil) {
@@ -209,6 +310,7 @@ final class AppViewModel: ObservableObject {
         runEventStreamTask?.cancel()
         filePollTask?.cancel()
         indexStatusClearTask?.cancel()
+        quickActionsIndexMonitorTask?.cancel()
         for task in autosaveTasksByPath.values {
             task.cancel()
         }
@@ -299,6 +401,18 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    var shouldShowQuickActionsInEmptyState: Bool {
+        visibleMessages.isEmpty
+    }
+
+    var quickActionsForDisplay: [QuickActionItemPayload] {
+        let normalized = normalizedQuickActions(quickActions, limit: 3)
+        if normalized.isEmpty {
+            return generalQuickActions(limit: 3)
+        }
+        return normalized
+    }
+
     var codexModelPresets: [CodexModelPreset] {
         var presets = baseCodexModelPresets
         let current = setupCodexPlannerModel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -322,6 +436,69 @@ final class AppViewModel: ObservableObject {
             composerText = composerText + (composerText.hasSuffix(" ") || composerText.isEmpty ? "" : " ") + replacement
         }
         refreshMentionState()
+    }
+
+    func applyQuickAction(_ action: QuickActionItemPayload) {
+        composerText = action.prompt
+        refreshMentionState()
+        composerFocusToken &+= 1
+    }
+
+    func refreshQuickActionsFast() {
+        quickActions = buildFastQuickActions(limit: 3)
+        quickActionsSource = "local_fast"
+    }
+
+    func refreshQuickActionsIndexed() async {
+        guard shouldShowQuickActionsInEmptyState else { return }
+        guard let projectID = project?.id else {
+            if quickActions.isEmpty {
+                refreshQuickActionsFast()
+            }
+            return
+        }
+
+        quickActionsLoading = true
+        defer { quickActionsLoading = false }
+
+        do {
+            let payload = try await client.quickActions(projectID: projectID, limit: 3)
+            quickActions = normalizedQuickActions(payload.actions, limit: 3)
+            quickActionsSource = payload.source
+        } catch let BackendError.httpError(code, _) where code == 404 {
+            if quickActions.isEmpty {
+                refreshQuickActionsFast()
+            }
+        } catch {
+            if quickActions.isEmpty {
+                refreshQuickActionsFast()
+            }
+        }
+    }
+
+    func monitorIndexJobAndRefreshQuickActions(jobID: String) {
+        quickActionsIndexMonitorTask?.cancel()
+        guard shouldShowQuickActionsInEmptyState else { return }
+        guard let projectID = project?.id else { return }
+
+        quickActionsIndexMonitorTask = Task { [weak self] in
+            guard let self else { return }
+            for _ in 0 ..< 160 {
+                if Task.isCancelled { return }
+                guard self.project?.id == projectID else { return }
+                do {
+                    let job = try await self.client.indexJob(projectID: projectID, jobID: jobID)
+                    let status = job.status.lowercased()
+                    if status == "done" || status == "failed" || status == "cancelled" {
+                        await self.refreshQuickActionsIndexed()
+                        return
+                    }
+                } catch {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(800))
+            }
+        }
     }
 
     func isDirectoryExpanded(_ item: FileItem) -> Bool {
@@ -808,6 +985,7 @@ final class AppViewModel: ObservableObject {
         for task in autosaveTasksByPath.values {
             task.cancel()
         }
+        quickActionsIndexMonitorTask?.cancel()
         cancelPendingExplorerSingleClick()
         autosaveTasksByPath = [:]
         workspaceTabs = []
@@ -816,6 +994,9 @@ final class AppViewModel: ObservableObject {
         externallyChangedBufferPaths = []
         selectedExplorerPath = nil
         folderViewPath = ""
+        quickActions = []
+        quickActionsSource = nil
+        quickActionsLoading = false
     }
 
     private func ensureDocumentBufferLoaded(relativePath: String, fileKind: FileKind, itemURL: URL, item: FileItem) {
@@ -1356,6 +1537,7 @@ final class AppViewModel: ObservableObject {
             refreshMentionState()
             startFilePolling()
             await refreshConversations()
+            await refreshQuickActionsIfNeeded()
             await autoIndexCurrentProject()
             await pingBackend()
             if backendConnected {
@@ -1799,6 +1981,7 @@ final class AppViewModel: ObservableObject {
                     await loadMessages(conversationID: selectedConversationID)
                 } else {
                     messages = []
+                    await refreshQuickActionsIfNeeded()
                 }
             }
         } catch {
@@ -1820,6 +2003,7 @@ final class AppViewModel: ObservableObject {
             selectedConversationID = conv.id
             messages = []
             errorText = nil
+            await refreshQuickActionsIfNeeded()
         } catch {
             errorText = "Could not create conversation: \(error.localizedDescription)"
         }
@@ -1837,6 +2021,7 @@ final class AppViewModel: ObservableObject {
             let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
             guard selectedConversationID == conversationID else { return }
             messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
+            await refreshQuickActionsIfNeeded()
             errorText = nil
         } catch BackendError.requestTimedOut {
             guard selectedConversationID == conversationID else { return }
@@ -1845,6 +2030,7 @@ final class AppViewModel: ObservableObject {
                 let loaded = try await client.listMessages(projectID: projectID, conversationID: conversationID)
                 guard selectedConversationID == conversationID else { return }
                 messages = loaded.sorted { $0.sequenceNo < $1.sequenceNo }
+                await refreshQuickActionsIfNeeded()
                 errorText = nil
             } catch {
                 guard selectedConversationID == conversationID else { return }
@@ -1868,6 +2054,10 @@ final class AppViewModel: ObservableObject {
             documentBuffers = [:]
             externallyChangedBufferPaths = []
             activeTabID = nil
+            quickActions = []
+            quickActionsSource = nil
+            quickActionsLoading = false
+            quickActionsIndexMonitorTask?.cancel()
             return
         }
 
@@ -1887,6 +2077,7 @@ final class AppViewModel: ObservableObject {
         reconcileWorkspaceAfterFileRefresh(scanned: scanned)
         syncOpenBuffersWithDisk(scanned: scanned)
         refreshMentionState()
+        refreshQuickActionsFast()
 
         guard triggerChangeIndex, hadPreviousSnapshot else { return }
         await autoIndexCurrentProject(fullScan: false, statusText: "New files detected. Re-indexing...")
@@ -1920,9 +2111,10 @@ final class AppViewModel: ObservableObject {
 
         indexingStatusText = statusText
         do {
-            try await client.triggerIndex(projectID: projectID, fullScan: fullScan)
+            let job = try await client.triggerIndex(projectID: projectID, fullScan: fullScan)
             indexingStatusText = fullScan ? "Indexing started" : "Change index started"
             scheduleIndexStatusClear()
+            monitorIndexJobAndRefreshQuickActions(jobID: job.jobId)
         } catch {
             indexingStatusText = nil
             errorText = "Could not auto-index project: \(error.localizedDescription)"
@@ -1947,6 +2139,130 @@ final class AppViewModel: ObservableObject {
             guard let self else { return }
             self.indexingStatusText = nil
         }
+    }
+
+    private func normalizedQuickActions(_ items: [QuickActionItemPayload], limit: Int) -> [QuickActionItemPayload] {
+        let target = max(1, limit)
+        var unique: [QuickActionItemPayload] = []
+        var seen = Set<String>()
+        for item in items {
+            if seen.contains(item.id) { continue }
+            seen.insert(item.id)
+            unique.append(item)
+            if unique.count >= target {
+                break
+            }
+        }
+        if unique.count < target {
+            for fallback in generalQuickActions(limit: target) where !seen.contains(fallback.id) {
+                unique.append(fallback)
+                seen.insert(fallback.id)
+                if unique.count >= target {
+                    break
+                }
+            }
+        }
+        return Array(unique.prefix(target))
+    }
+
+    private func generalQuickActions(limit: Int) -> [QuickActionItemPayload] {
+        Array(quickActionGeneralSpecs.prefix(max(0, limit))).map { item in
+            QuickActionItemPayload(
+                id: item.id,
+                label: item.label,
+                prompt: item.prompt,
+                category: "general",
+                confidence: 0.25,
+                reason: item.reason
+            )
+        }
+    }
+
+    private func buildFastQuickActions(limit: Int) -> [QuickActionItemPayload] {
+        let target = max(1, limit)
+        let filePaths = files.filter { !$0.isDirectory }.map(\.relativePath)
+        guard !filePaths.isEmpty else {
+            return generalQuickActions(limit: target)
+        }
+
+        var ranked: [(spec: DomainQuickActionSpec, confidence: Double, reason: String)] = []
+        for spec in quickActionDomainSpecs {
+            var rawScore: Double = 0
+            var matched = Set<String>()
+            for path in filePaths {
+                let lowered = path.lowercased()
+                let normalized = lowered.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+                for keyword in spec.keywords {
+                    let needle = keyword.lowercased()
+                    let spaced = needle.replacingOccurrences(of: "-", with: " ")
+                    if lowered.contains(needle) || normalized.contains(spaced) {
+                        rawScore += 1.0
+                        matched.insert(keyword)
+                    }
+                }
+            }
+            let confidence = min(1.0, max(0.0, 1.0 - exp(-(rawScore / 3.0))))
+            let reason = matched.isEmpty
+                ? "Low local signal."
+                : "Matched filenames: \(matched.sorted().joined(separator: ", "))"
+            ranked.append((spec, confidence, reason))
+        }
+        ranked.sort { lhs, rhs in
+            if lhs.confidence == rhs.confidence {
+                return lhs.spec.category < rhs.spec.category
+            }
+            return lhs.confidence > rhs.confidence
+        }
+
+        var selected = ranked.filter { $0.confidence >= quickActionDomainThreshold }
+        if selected.count > 2 {
+            selected = Array(selected.prefix(2))
+        }
+        if selected.count < 2 {
+            for candidate in ranked {
+                if selected.contains(where: { $0.spec.category == candidate.spec.category }) {
+                    continue
+                }
+                selected.append(
+                    (
+                        spec: candidate.spec,
+                        confidence: max(candidate.confidence, quickActionDomainThreshold),
+                        reason: candidate.reason
+                    )
+                )
+                if selected.count >= 2 {
+                    break
+                }
+            }
+        }
+
+        if selected.isEmpty {
+            return generalQuickActions(limit: target)
+        }
+
+        var actions: [QuickActionItemPayload] = []
+        for (index, domain) in selected.prefix(2).enumerated() {
+            actions.append(
+                QuickActionItemPayload(
+                    id: "qa-\(domain.spec.category)-fast-\(index + 1)",
+                    label: domain.spec.label,
+                    prompt: domain.spec.prompt,
+                    category: domain.spec.category,
+                    confidence: min(1.0, max(domain.confidence, quickActionDomainThreshold)),
+                    reason: domain.reason
+                )
+            )
+        }
+        if actions.count < target {
+            actions.append(contentsOf: generalQuickActions(limit: target - actions.count))
+        }
+        return Array(actions.prefix(target))
+    }
+
+    private func refreshQuickActionsIfNeeded() async {
+        guard shouldShowQuickActionsInEmptyState else { return }
+        refreshQuickActionsFast()
+        await refreshQuickActionsIndexed()
     }
 
     private func refreshMentionState() {
@@ -2101,10 +2417,23 @@ final class AppViewModel: ObservableObject {
         runPlanningText = nil
         runPlannerPreview = nil
         runTodos = []
+        resetRunProgressState()
         if clearEvents {
             runFeedbackEvents = []
             lastRunEventID = 0
+            lastFeedbackEventKey = nil
+            lastFeedbackEventAt = .distantPast
         }
+    }
+
+    private func resetRunProgressState() {
+        runCurrentPhase = nil
+        runPhaseLabel = nil
+        runPhaseIndex = 0
+        runPhaseTotal = 0
+        runProgressCurrentStep = 0
+        runProgressTotalSteps = 0
+        runProgressCompletedSteps = 0
     }
 
     private func clearPendingRunConfirmation() {
@@ -2224,6 +2553,15 @@ final class AppViewModel: ObservableObject {
         detail: String? = nil,
         timestampISO: String? = nil
     ) {
+        let normalizedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let eventKey = "\(type.lowercased())|\(title.lowercased())|\((normalizedDetail ?? "").lowercased())"
+        let now = Date()
+        if eventKey == lastFeedbackEventKey, now.timeIntervalSince(lastFeedbackEventAt) < 1.5 {
+            return
+        }
+        lastFeedbackEventKey = eventKey
+        lastFeedbackEventAt = now
+
         let isoText = timestampISO ?? ISO8601DateFormatter().string(from: Date())
         let displayTime: String
         if let parsed = feedbackSourceFormatter.date(from: isoText) {
@@ -2236,7 +2574,7 @@ final class AppViewModel: ObservableObject {
             id: "event-\(lastRunEventID)-\(runFeedbackEvents.count + 1)-\(UUID().uuidString)",
             type: type,
             title: title,
-            detail: detail,
+            detail: normalizedDetail,
             timestamp: displayTime
         )
         runFeedbackEvents.append(event)
@@ -2281,6 +2619,45 @@ final class AppViewModel: ObservableObject {
         guard event.runId == nil || event.runId == expectedRunID else { return }
 
         switch event.type {
+        case "run_phase":
+            let phaseName = event.runPhaseName?.lowercased()
+            runCurrentPhase = phaseName
+            runPhaseLabel = event.runPhaseLabel
+            runPhaseIndex = event.runPhaseIndex ?? runPhaseIndex
+            runPhaseTotal = event.runPhaseTotal ?? runPhaseTotal
+            if phaseName == "completed" {
+                runThinkingText = nil
+                runPlanningText = "Run completed."
+            } else if phaseName == "failed" {
+                runThinkingText = nil
+                runPlanningText = "Run failed."
+            } else if phaseName == "awaiting_confirmation" {
+                runThinkingText = nil
+                runPlanningText = "Review changes and apply or discard."
+            }
+
+        case "run_progress":
+            if let progress = event.runProgressPayload {
+                runProgressCurrentStep = progress.currentStep
+                runProgressTotalSteps = progress.totalSteps
+                runProgressCompletedSteps = progress.completedSteps
+                if runCurrentPhase == nil {
+                    runCurrentPhase = "executing"
+                }
+                if runPhaseLabel == nil || runPhaseLabel?.isEmpty == true {
+                    runPhaseLabel = "Executing planned steps"
+                }
+            }
+
+        case "run_note":
+            let title = event.runNoteKind?.capitalized ?? "Note"
+            appendRunFeedbackEvent(
+                type: "note",
+                title: title,
+                detail: event.runNoteText,
+                timestampISO: event.ts
+            )
+
         case "run_started":
             runThinkingText = "Thinking and planning..."
             runPlanningText = "Gathering indexed context..."
@@ -2389,12 +2766,16 @@ final class AppViewModel: ObservableObject {
             runThinkingText = nil
             runPlanningText = "Run completed."
             clearPendingRunConfirmation()
+            runCurrentPhase = "completed"
+            runPhaseLabel = "Run completed"
             appendRunFeedbackEvent(type: "status", title: "Run completed", detail: nil, timestampISO: event.ts)
 
         case "run_failed":
             runThinkingText = nil
             runPlanningText = "Run failed."
             clearPendingRunConfirmation()
+            runCurrentPhase = "failed"
+            runPhaseLabel = "Run failed"
             let failures = event.payload["failures"]?.intValue
             let detail = failures != nil ? "\(failures ?? 0) step(s) failed" : nil
             appendRunFeedbackEvent(type: "error", title: "Run failed", detail: detail, timestampISO: event.ts)
@@ -2404,6 +2785,8 @@ final class AppViewModel: ObservableObject {
             runPlanningText = "Review changes and apply or discard."
             pendingRunConfirmationID = expectedRunID
             pendingRunRequiresConfirmation = true
+            runCurrentPhase = "awaiting_confirmation"
+            runPhaseLabel = "Awaiting confirmation"
             if let outcomeKind = event.payload["outcome_kind"]?.stringValue, !outcomeKind.isEmpty {
                 pendingRunOutcomeKind = outcomeKind
             }
@@ -2450,6 +2833,11 @@ final class AppViewModel: ObservableObject {
         default:
             break
         }
+    }
+
+    func applyRunEventForTesting(_ event: ProjectEvent, expectedRunID: String) {
+        activeRunID = expectedRunID
+        applyRunEvent(event, expectedRunID: expectedRunID)
     }
 
     private func startRunEventStream(projectID: String, conversationID: String, runID: String) {

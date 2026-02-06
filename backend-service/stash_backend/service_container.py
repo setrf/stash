@@ -8,6 +8,7 @@ from .indexer import IndexingService
 from .orchestrator import RunOrchestrator
 from .planner import Planner
 from .project_store import ProjectStore
+from .quick_actions import QuickActionService
 from .runtime_config import RuntimeConfigStore
 from .watcher import WatcherService
 
@@ -20,6 +21,7 @@ class Services:
     indexer: IndexingService
     watcher: WatcherService
     planner: Planner
+    quick_actions: QuickActionService
     codex: CodexExecutor
     orchestrator: RunOrchestrator
 
@@ -29,6 +31,7 @@ def build_services(settings: Settings) -> Services:
     project_store = ProjectStore()
     indexer = IndexingService(settings)
     planner = Planner(settings, runtime_config_store=runtime_config)
+    quick_actions = QuickActionService(planner=planner)
     codex = CodexExecutor(settings, runtime_config_store=runtime_config)
     watcher = WatcherService(
         project_store=project_store,
@@ -50,6 +53,7 @@ def build_services(settings: Settings) -> Services:
         indexer=indexer,
         watcher=watcher,
         planner=planner,
+        quick_actions=quick_actions,
         codex=codex,
         orchestrator=orchestrator,
     )

@@ -50,6 +50,16 @@ CSV_EXTENSIONS = {"csv", "tsv"}
 OFFICE_EXTENSIONS = {"doc", "docx", "xls", "xlsx", "ppt", "pptx"}
 MAX_CHANGE_DIFF_CHARS = 5000
 IGNORED_CHANGE_PATHS = {"STASH_HISTORY.md"}
+PHASE_ORDER = {
+    "preparing_context": 1,
+    "planning": 2,
+    "executing": 3,
+    "synthesizing": 4,
+    "awaiting_confirmation": 5,
+    "completed": 6,
+    "failed": 6,
+}
+PHASE_TOTAL = 6
 
 
 class RunOrchestrator:
@@ -68,6 +78,80 @@ class RunOrchestrator:
         self.codex = codex
         self.runtime_config_store = runtime_config_store
         self._tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _emit_run_phase(
+        self,
+        *,
+        repo: ProjectRepository,
+        conversation_id: str,
+        run_id: str,
+        phase: str,
+        label: str,
+    ) -> None:
+        phase_key = phase.strip().lower()
+        progress_index = PHASE_ORDER.get(phase_key, 0)
+        repo.add_event(
+            "run_phase",
+            conversation_id=conversation_id,
+            run_id=run_id,
+            payload={
+                "phase": phase_key,
+                "label": label.strip()[:120],
+                "progress_index": progress_index,
+                "progress_total": PHASE_TOTAL,
+            },
+        )
+
+    def _emit_run_progress(
+        self,
+        *,
+        repo: ProjectRepository,
+        conversation_id: str,
+        run_id: str,
+        current_step: int,
+        total_steps: int,
+        completed_steps: int,
+        failed_steps: int,
+        active_step_label: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "current_step": max(0, int(current_step)),
+            "total_steps": max(0, int(total_steps)),
+            "completed_steps": max(0, int(completed_steps)),
+            "failed_steps": max(0, int(failed_steps)),
+        }
+        if active_step_label:
+            payload["active_step_label"] = active_step_label.strip()[:120]
+        if duration_ms is not None:
+            payload["duration_ms"] = max(0, int(duration_ms))
+        repo.add_event("run_progress", conversation_id=conversation_id, run_id=run_id, payload=payload)
+
+    def _emit_run_note(
+        self,
+        *,
+        repo: ProjectRepository,
+        conversation_id: str,
+        run_id: str,
+        kind: str,
+        text: str,
+    ) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        repo.add_event(
+            "run_note",
+            conversation_id=conversation_id,
+            run_id=run_id,
+            payload={
+                "kind": kind.strip().lower()[:24],
+                "text": cleaned[:120],
+            },
+        )
+
+    def _compact_step_label(self, command_text: str) -> str:
+        compact = " ".join(command_text.strip().split())
+        return compact[:120]
 
     def _runtime_config(self) -> RuntimeConfig:
         if self.runtime_config_store is not None:
@@ -807,6 +891,20 @@ class RunOrchestrator:
             run_id=run_id,
             payload={"copied": apply_summary["copied"], "deleted": apply_summary["deleted"]},
         )
+        self._emit_run_note(
+            repo=repo,
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            kind="executor",
+            text=summary_text,
+        )
+        self._emit_run_phase(
+            repo=repo,
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            phase="completed",
+            label="Changes applied",
+        )
         repo.add_event(
             "message_finalized",
             conversation_id=run["conversation_id"],
@@ -851,6 +949,13 @@ class RunOrchestrator:
             conversation_id=run["conversation_id"],
             run_id=run_id,
             payload={},
+        )
+        self._emit_run_note(
+            repo=repo,
+            conversation_id=run["conversation_id"],
+            run_id=run_id,
+            kind="executor",
+            text="Preview changes were discarded.",
         )
         repo.add_event(
             "message_finalized",
@@ -973,6 +1078,13 @@ class RunOrchestrator:
                     "changes": changes[:30],
                 },
             )
+            self._emit_run_phase(
+                repo=repo,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                phase="awaiting_confirmation",
+                label="Awaiting confirmation",
+            )
             repo.add_event(
                 "run_latency_summary",
                 conversation_id=conversation_id,
@@ -1013,6 +1125,13 @@ class RunOrchestrator:
                 run_id=run_id,
                 payload={"failures": failures, "latency_ms": latency_summary_payload},
             )
+            self._emit_run_phase(
+                repo=repo,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                phase="failed",
+                label="Run failed",
+            )
         else:
             repo.update_run(
                 run_id,
@@ -1025,6 +1144,13 @@ class RunOrchestrator:
                 conversation_id=conversation_id,
                 run_id=run_id,
                 payload={"steps": step_count, "latency_ms": latency_summary_payload},
+            )
+            self._emit_run_phase(
+                repo=repo,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                phase="completed",
+                label="Run completed",
             )
         repo.add_event(
             "run_latency_summary",
@@ -1137,7 +1263,17 @@ class RunOrchestrator:
                     "execution_mode": "execute",
                 },
             )
+            self._emit_run_phase(
+                repo=repo,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                phase="executing",
+                label="Executing planned steps",
+            )
 
+        total_steps = len(direct_result.commands)
+        completed_steps = 0
+        failed_steps = 0
         for step_index, item in enumerate(direct_result.commands, start=1):
             command_cwd = item.cwd or str(context.root_path.resolve())
             try:
@@ -1182,6 +1318,16 @@ class RunOrchestrator:
                         "execution_mode": "direct_codex",
                     },
                 )
+                self._emit_run_progress(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    current_step=step_index,
+                    total_steps=total_steps,
+                    completed_steps=completed_steps,
+                    failed_steps=failed_steps,
+                    active_step_label=self._compact_step_label(item.command),
+                )
                 step_output: dict[str, Any] = {
                     "engine": direct_result.engine,
                     "exit_code": int(item.exit_code),
@@ -1215,6 +1361,19 @@ class RunOrchestrator:
                     conversation_id=conversation_id,
                     run_id=run_id,
                     payload=event_payload,
+                )
+                completed_steps += 1
+                if status != "completed":
+                    failed_steps += 1
+                self._emit_run_progress(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    current_step=step_index,
+                    total_steps=total_steps,
+                    completed_steps=completed_steps,
+                    failed_steps=failed_steps,
+                    active_step_label=self._compact_step_label(item.command),
                 )
                 repo.create_message(
                     conversation_id,
@@ -1255,6 +1414,21 @@ class RunOrchestrator:
 
         assistant_content = self.planner.sanitize_assistant_text(direct_result.assistant_text or "")
         if not assistant_content.strip():
+            with context.lock:
+                self._emit_run_phase(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    phase="synthesizing",
+                    label="Synthesizing response",
+                )
+                self._emit_run_note(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    kind="synthesis",
+                    text="Compiling final response from execution results.",
+                )
             synthesis_started = time.perf_counter()
             synthesized = self.planner.synthesize_response(
                 user_message=str(trigger_msg.get("content", "")),
@@ -1328,6 +1502,13 @@ class RunOrchestrator:
                         "execution_mode": execution_mode,
                     },
                 )
+                self._emit_run_phase(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    phase="preparing_context",
+                    label="Preparing context",
+                )
 
             trigger_msg = repo.get_message(conversation_id, trigger_message_id)
             if not trigger_msg:
@@ -1371,6 +1552,14 @@ class RunOrchestrator:
                     preview_root=preview_root,
                 )
                 return
+            with context.lock:
+                self._emit_run_phase(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    phase="planning",
+                    label="Planning actions",
+                )
             planning_started = time.perf_counter()
             plan = await asyncio.to_thread(
                 self.planner.plan,
@@ -1400,6 +1589,13 @@ class RunOrchestrator:
                             "elapsed_ms": planning_ms,
                             "planner_mode": runtime.planner_mode,
                         },
+                    )
+                    self._emit_run_note(
+                        repo=repo,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        kind="recovery",
+                        text="Planner timeout detected, continuing with a recovery pass.",
                     )
 
                 delayed_timeout = max(45, min(max(runtime.planner_timeout_seconds, 45), 120))
@@ -1457,12 +1653,31 @@ class RunOrchestrator:
                         "timed_out_primary": plan.timed_out_primary,
                     },
                 )
+                if plan.used_fallback:
+                    self._emit_run_note(
+                        repo=repo,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        kind="planner",
+                        text=f"Planner fallback used: {plan.used_fallback}",
+                    )
+                self._emit_run_phase(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    phase="executing",
+                    label="Executing planned steps",
+                )
 
             tool_summaries: list[str] = []
             tool_results_for_response: list[dict[str, Any]] = []
             output_files_for_response: list[str] = []
             output_file_seen: set[str] = set()
             failures = 0
+            total_steps = len(plan.commands)
+            completed_steps = 0
+            failed_steps = 0
+            progress_lock = asyncio.Lock()
 
             async def execute_one_step(
                 *,
@@ -1470,12 +1685,16 @@ class RunOrchestrator:
                 command: Any,
                 execution_mode: str,
             ) -> dict[str, Any]:
+                nonlocal completed_steps, failed_steps
                 command_base_cwd = self._resolve_command_base_cwd(context=command_context, command_cwd=command.cwd)
                 baseline = self._capture_output_baseline(
                     context=command_context,
                     cwd=command_base_cwd,
                     command_text=command.cmd,
                 )
+                async with progress_lock:
+                    completed_snapshot = completed_steps
+                    failed_snapshot = failed_steps
                 with context.lock:
                     step_id = repo.create_run_step(
                         run_id,
@@ -1497,6 +1716,16 @@ class RunOrchestrator:
                             "step_index": step_index,
                             "execution_mode": execution_mode,
                         },
+                    )
+                    self._emit_run_progress(
+                        repo=repo,
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        current_step=step_index,
+                        total_steps=total_steps,
+                        completed_steps=completed_snapshot,
+                        failed_steps=failed_snapshot,
+                        active_step_label=self._compact_step_label(command.cmd),
                     )
 
                 step_exec_started = time.perf_counter()
@@ -1528,6 +1757,12 @@ class RunOrchestrator:
                     if output_files:
                         output["output_files"] = output_files
                     status = "completed" if result.exit_code == 0 else "failed"
+                    async with progress_lock:
+                        completed_steps += 1
+                        if status != "completed":
+                            failed_steps += 1
+                        completed_snapshot = completed_steps
+                        failed_snapshot = failed_steps
 
                     with context.lock:
                         repo.finish_run_step(step_id, status=status, output_data=output)
@@ -1548,6 +1783,17 @@ class RunOrchestrator:
                             conversation_id=conversation_id,
                             run_id=run_id,
                             payload=event_payload,
+                        )
+                        self._emit_run_progress(
+                            repo=repo,
+                            conversation_id=conversation_id,
+                            run_id=run_id,
+                            current_step=step_index,
+                            total_steps=total_steps,
+                            completed_steps=completed_snapshot,
+                            failed_steps=failed_snapshot,
+                            active_step_label=self._compact_step_label(command.cmd),
+                            duration_ms=step_exec_ms,
                         )
                         repo.create_message(
                             conversation_id,
@@ -1585,6 +1831,11 @@ class RunOrchestrator:
 
                 except (CodexCommandError, RuntimeError) as exc:
                     step_exec_ms = int((time.perf_counter() - step_exec_started) * 1000)
+                    async with progress_lock:
+                        completed_steps += 1
+                        failed_steps += 1
+                        completed_snapshot = completed_steps
+                        failed_snapshot = failed_steps
                     with context.lock:
                         repo.finish_run_step(step_id, status="failed", error=str(exc))
                         repo.add_event(
@@ -1599,6 +1850,17 @@ class RunOrchestrator:
                                 "duration_ms": step_exec_ms,
                                 "execution_mode": execution_mode,
                             },
+                        )
+                        self._emit_run_progress(
+                            repo=repo,
+                            conversation_id=conversation_id,
+                            run_id=run_id,
+                            current_step=step_index,
+                            total_steps=total_steps,
+                            completed_steps=completed_snapshot,
+                            failed_steps=failed_snapshot,
+                            active_step_label=self._compact_step_label(command.cmd),
+                            duration_ms=step_exec_ms,
                         )
                     logger.warning(
                         "Run step failed before execution result run_id=%s step=%s mode=%s error=%s",
@@ -1712,6 +1974,21 @@ class RunOrchestrator:
                         output_files_for_response.append(artifact)
 
             assistant_content = self.planner.sanitize_assistant_text(plan.planner_text) or plan.planner_text
+            with context.lock:
+                self._emit_run_phase(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    phase="synthesizing",
+                    label="Synthesizing response",
+                )
+                self._emit_run_note(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    kind="synthesis",
+                    text="Compiling final response from execution results.",
+                )
             synthesis_started = time.perf_counter()
             synthesized = self.planner.synthesize_response(
                 user_message=str(trigger_msg.get("content", "")),
@@ -1775,6 +2052,20 @@ class RunOrchestrator:
                     conversation_id=conversation_id,
                     run_id=run_id,
                     payload={"error": str(exc)},
+                )
+                self._emit_run_phase(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    phase="failed",
+                    label="Run failed",
+                )
+                self._emit_run_note(
+                    repo=repo,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    kind="recovery",
+                    text="Run crashed before completion.",
                 )
             if preview_root is not None:
                 self._cleanup_preview_workspace(context, run_id)

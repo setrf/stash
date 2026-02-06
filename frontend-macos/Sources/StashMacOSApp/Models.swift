@@ -522,10 +522,85 @@ struct ProjectEvent: Decodable, Identifiable {
     let payload: [String: JSONValue]
 }
 
+struct RunProgressPayload: Hashable {
+    let currentStep: Int
+    let totalSteps: Int
+    let completedSteps: Int
+    let failedSteps: Int
+    let activeStepLabel: String?
+    let durationMs: Int?
+}
+
+extension ProjectEvent {
+    var runPhaseName: String? {
+        payload["phase"]?.stringValue
+    }
+
+    var runPhaseLabel: String? {
+        payload["label"]?.stringValue
+    }
+
+    var runPhaseIndex: Int? {
+        payload["progress_index"]?.intValue
+    }
+
+    var runPhaseTotal: Int? {
+        payload["progress_total"]?.intValue
+    }
+
+    var runProgressPayload: RunProgressPayload? {
+        guard let totalSteps = payload["total_steps"]?.intValue else {
+            return nil
+        }
+        return RunProgressPayload(
+            currentStep: payload["current_step"]?.intValue ?? 0,
+            totalSteps: totalSteps,
+            completedSteps: payload["completed_steps"]?.intValue ?? 0,
+            failedSteps: payload["failed_steps"]?.intValue ?? 0,
+            activeStepLabel: payload["active_step_label"]?.stringValue,
+            durationMs: payload["duration_ms"]?.intValue
+        )
+    }
+
+    var runNoteKind: String? {
+        payload["kind"]?.stringValue
+    }
+
+    var runNoteText: String? {
+        payload["text"]?.stringValue
+    }
+}
+
 struct TaskStatus: Decodable {
     let messageId: String
     let runId: String?
     let status: String
+}
+
+struct IndexJobResponse: Decodable {
+    let jobId: String
+    let projectId: String
+    let status: String
+    let startedAt: String
+    let finishedAt: String?
+    let detail: [String: JSONValue]
+}
+
+struct QuickActionItemPayload: Decodable, Identifiable, Hashable {
+    let id: String
+    let label: String
+    let prompt: String
+    let category: String
+    let confidence: Double
+    let reason: String?
+}
+
+struct QuickActionsPayload: Decodable {
+    let projectId: String
+    let actions: [QuickActionItemPayload]
+    let source: String
+    let indexedFileCount: Int
+    let generatedAt: String
 }
 
 struct SearchResponse: Decodable {

@@ -426,6 +426,105 @@ class OrchestratorLatencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(discarded["status"], "cancelled")
         self.assertFalse((self.context.root_path / "should_discard.txt").exists())
 
+    async def test_run_phase_events_emitted_in_order(self) -> None:
+        planner = _FakePlanner(
+            [
+                _plan_with_commands(
+                    (
+                        "Do one read step.\n"
+                        "<codex_cmd>\nworktree: main\ncwd: .\ncmd: ls -la\n</codex_cmd>\n"
+                    ),
+                    used_backend="codex",
+                )
+            ],
+            synthesized_text="Done",
+        )
+        codex = _FakeCodex()
+        runtime_store = _FakeRuntimeConfigStore(RuntimeConfig(execution_mode="planner"))
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=runtime_store,  # type: ignore[arg-type]
+        )
+
+        run_id = await self._run_orchestrator(orchestrator)
+        self.assertIsNotNone(self.repo.get_run(run_id))
+
+        events = self.repo.list_events(after_id=0, conversation_id=self.conversation["id"], limit=400)
+        phases = [str(event["payload"].get("phase")) for event in events if event["type"] == "run_phase"]
+        self.assertIn("preparing_context", phases)
+        self.assertIn("planning", phases)
+        self.assertIn("executing", phases)
+        self.assertIn("synthesizing", phases)
+        self.assertIn("completed", phases)
+        self.assertLess(phases.index("preparing_context"), phases.index("planning"))
+        self.assertLess(phases.index("planning"), phases.index("executing"))
+        self.assertLess(phases.index("executing"), phases.index("synthesizing"))
+
+    async def test_run_progress_emits_step_counts(self) -> None:
+        planner = _FakePlanner(
+            [
+                _plan_with_commands(
+                    (
+                        "Read two files.\n"
+                        "<codex_cmd>\nworktree: main\ncwd: .\ncmd: ls -la\n</codex_cmd>\n"
+                        "<codex_cmd>\nworktree: main\ncwd: .\ncmd: pwd\n</codex_cmd>\n"
+                    ),
+                    used_backend="codex",
+                )
+            ],
+            synthesized_text="Done",
+        )
+        codex = _FakeCodex()
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=_FakeRuntimeConfigStore(RuntimeConfig(execution_mode="planner")),  # type: ignore[arg-type]
+        )
+        await self._run_orchestrator(orchestrator)
+        events = self.repo.list_events(after_id=0, conversation_id=self.conversation["id"], limit=400)
+        progress_events = [event for event in events if event["type"] == "run_progress"]
+        self.assertTrue(progress_events)
+        totals = {int(event["payload"].get("total_steps", 0)) for event in progress_events}
+        self.assertEqual(totals, {2})
+        final = progress_events[-1]["payload"]
+        self.assertEqual(int(final.get("completed_steps", 0)), 2)
+        self.assertEqual(int(final.get("failed_steps", 0)), 0)
+
+    async def test_minimal_run_note_emission(self) -> None:
+        planner = _FakePlanner(
+            [
+                _plan_with_commands(
+                    (
+                        "One step.\n"
+                        "<codex_cmd>\nworktree: main\ncwd: .\ncmd: ls -la\n</codex_cmd>\n"
+                    ),
+                    used_backend="codex",
+                )
+            ],
+            synthesized_text="Done",
+        )
+        codex = _FakeCodex()
+        orchestrator = RunOrchestrator(
+            project_store=self.project_store,
+            indexer=_FakeIndexer(),
+            planner=planner,  # type: ignore[arg-type]
+            codex=codex,  # type: ignore[arg-type]
+            runtime_config_store=_FakeRuntimeConfigStore(RuntimeConfig(execution_mode="planner")),  # type: ignore[arg-type]
+        )
+        await self._run_orchestrator(orchestrator)
+
+        events = self.repo.list_events(after_id=0, conversation_id=self.conversation["id"], limit=400)
+        notes = [event for event in events if event["type"] == "run_note"]
+        self.assertGreaterEqual(len(notes), 1)
+        self.assertLessEqual(len(notes), 3)
+        note_kinds = {str(event["payload"].get("kind")) for event in notes}
+        self.assertIn("synthesis", note_kinds)
+
 
 if __name__ == "__main__":
     unittest.main()

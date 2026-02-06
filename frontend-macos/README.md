@@ -20,6 +20,10 @@ Codex-style light-mode desktop UI for Stash.
   - New/removed files in the folder tree are reflected in the UI automatically
   - File changes trigger incremental re-index requests (`full_scan: false`)
 - Conversation switcher and message timeline
+- Empty-chat quick actions (always 3 buttons):
+  - Fast local suggestions based on scanned files
+  - Indexed+AI refinement after indexing updates
+  - Button tap prefills composer (no auto-send)
 - Composer to send work requests to backend
 - Run polling and status display
 - Optimistic user messages (your sent message appears immediately)

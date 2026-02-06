@@ -208,16 +208,32 @@ struct BackendClient {
         )
     }
 
-    func triggerIndex(projectID: String, fullScan: Bool = true) async throws {
+    func triggerIndex(projectID: String, fullScan: Bool = true) async throws -> IndexJobResponse {
         struct Payload: Encodable {
             let fullScan: Bool
         }
-        struct Empty: Decodable {}
-        _ = try await request(
+        return try await request(
             path: "/v1/projects/\(projectID)/index",
             method: "POST",
             body: Payload(fullScan: fullScan)
-        ) as Empty
+        )
+    }
+
+    func indexJob(projectID: String, jobID: String) async throws -> IndexJobResponse {
+        try await request(
+            path: "/v1/projects/\(projectID)/index/jobs/\(jobID)",
+            method: "GET",
+            body: Optional<Int>.none
+        )
+    }
+
+    func quickActions(projectID: String, limit: Int = 3) async throws -> QuickActionsPayload {
+        try await request(
+            path: "/v1/projects/\(projectID)/quick-actions?limit=\(max(1, min(limit, 6)))",
+            method: "GET",
+            body: Optional<Int>.none,
+            timeout: 20
+        )
     }
 
     func search(projectID: String, query: String, limit: Int = 5) async throws -> SearchResponse {

@@ -12,6 +12,7 @@ Local-first FastAPI backend for the Stash macOS app.
 - Background file watcher + indexing
 - Codex tagged-command execution in controlled worktree folders
 - Conversation/run/event APIs for history and resume
+- Quick-actions API for context-aware empty-chat suggestions
 
 ## Project portability rule
 
@@ -96,3 +97,16 @@ Codex CLI integration test (mocked Codex binary, full planner+executor API path)
 - Integration diagnostics endpoints:
   - `GET /health/integrations`
   - `GET /v1/runtime/setup-status`
+
+## Quick Actions Endpoint
+
+New endpoint for empty-chat context suggestions:
+
+- `GET /v1/projects/{project_id}/quick-actions?limit=3`
+
+Response includes:
+
+- `actions` (id, label, prompt, category, confidence, reason)
+- `source` (`indexed_ai`, `indexed_fallback`, `general_only`)
+- `indexed_file_count`
+- `generated_at`

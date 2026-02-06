@@ -192,6 +192,191 @@ final class WorkspaceCoreTests: XCTestCase {
         XCTAssertTrue(viewModel.runInlineSummaryText.contains("Review pending changes"))
     }
 
+    @MainActor
+    func testInlineSummaryPrefersPhaseAndProgress() {
+        let viewModel = AppViewModel()
+        viewModel.runInProgress = true
+        viewModel.runCurrentPhase = "executing"
+        viewModel.runPhaseLabel = "Executing planned steps"
+        viewModel.runProgressCurrentStep = 2
+        viewModel.runProgressTotalSteps = 5
+        viewModel.runProgressCompletedSteps = 1
+        viewModel.runThinkingText = "Thinking and planning..."
+
+        XCTAssertEqual(viewModel.runInlineSummaryText, "Executing planned steps • Step 2/5")
+        XCTAssertEqual(viewModel.runProgressBadgeText, "Step 2/5")
+    }
+
+    @MainActor
+    func testRunPhaseEventUpdatesInlineState() {
+        let viewModel = AppViewModel()
+        viewModel.applyRunEventForTesting(
+            makeEvent(
+                id: 1,
+                type: "run_phase",
+                payload: [
+                    "phase": .string("planning"),
+                    "label": .string("Planning actions"),
+                    "progress_index": .number(2),
+                    "progress_total": .number(6),
+                ]
+            ),
+            expectedRunID: "run-1"
+        )
+
+        XCTAssertEqual(viewModel.runCurrentPhase, "planning")
+        XCTAssertEqual(viewModel.runPhaseLabel, "Planning actions")
+        XCTAssertEqual(viewModel.runPhaseIndex, 2)
+        XCTAssertEqual(viewModel.runPhaseTotal, 6)
+    }
+
+    @MainActor
+    func testRunProgressEventUpdatesStepCounters() {
+        let viewModel = AppViewModel()
+        viewModel.applyRunEventForTesting(
+            makeEvent(
+                id: 2,
+                type: "run_progress",
+                payload: [
+                    "current_step": .number(3),
+                    "total_steps": .number(7),
+                    "completed_steps": .number(2),
+                    "failed_steps": .number(1),
+                    "active_step_label": .string("rg --files"),
+                ]
+            ),
+            expectedRunID: "run-2"
+        )
+
+        XCTAssertEqual(viewModel.runProgressCurrentStep, 3)
+        XCTAssertEqual(viewModel.runProgressTotalSteps, 7)
+        XCTAssertEqual(viewModel.runProgressCompletedSteps, 2)
+    }
+
+    @MainActor
+    func testDuplicateMilestonesAreSuppressed() {
+        let viewModel = AppViewModel()
+        let event = makeEvent(
+            id: 3,
+            type: "run_note",
+            payload: [
+                "kind": .string("synthesis"),
+                "text": .string("Compiling final response."),
+            ]
+        )
+
+        viewModel.applyRunEventForTesting(event, expectedRunID: "run-3")
+        viewModel.applyRunEventForTesting(event, expectedRunID: "run-3")
+
+        XCTAssertEqual(viewModel.runFeedbackEvents.count, 1)
+    }
+
+    @MainActor
+    func testConfirmationStateStillOverridesInlineProgress() {
+        let viewModel = AppViewModel()
+        viewModel.runCurrentPhase = "executing"
+        viewModel.runPhaseLabel = "Executing planned steps"
+        viewModel.runProgressCurrentStep = 4
+        viewModel.runProgressTotalSteps = 10
+        viewModel.pendingRunConfirmationID = "run-awaiting"
+        viewModel.pendingRunChanges = []
+
+        XCTAssertEqual(viewModel.runInlineState, .awaitingConfirmation)
+        XCTAssertTrue(viewModel.runInlineSummaryText.contains("Review pending changes"))
+    }
+
+    @MainActor
+    func testFastQuickActionsMapContractToLegal() throws {
+        let temp = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        let contractURL = temp.appendingPathComponent("contracts/master-agreement.md")
+        try FileManager.default.createDirectory(at: contractURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "Contract terms".write(to: contractURL, atomically: true, encoding: .utf8)
+
+        let viewModel = AppViewModel()
+        viewModel.project = Project(id: "proj-qa-1", name: "proj-qa-1", rootPath: temp.path, createdAt: nil, lastOpenedAt: nil, activeConversationId: nil)
+        viewModel.projectRootURL = temp
+        viewModel.files = FileScanner.scan(rootURL: temp)
+        viewModel.refreshQuickActionsFast()
+
+        let categories = viewModel.quickActionsForDisplay.map(\.category)
+        XCTAssertEqual(viewModel.quickActionsForDisplay.count, 3)
+        XCTAssertEqual(categories.first, "legal")
+    }
+
+    @MainActor
+    func testFastQuickActionsMixedContextUsesTwoDomainPlusGeneral() throws {
+        let temp = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: temp) }
+
+        try FileManager.default.createDirectory(at: temp.appendingPathComponent("contracts"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: temp.appendingPathComponent("stocks"), withIntermediateDirectories: true)
+        try "agreement".write(to: temp.appendingPathComponent("contracts/nda.txt"), atomically: true, encoding: .utf8)
+        try "portfolio".write(to: temp.appendingPathComponent("stocks/portfolio_notes.md"), atomically: true, encoding: .utf8)
+
+        let viewModel = AppViewModel()
+        viewModel.project = Project(id: "proj-qa-2", name: "proj-qa-2", rootPath: temp.path, createdAt: nil, lastOpenedAt: nil, activeConversationId: nil)
+        viewModel.projectRootURL = temp
+        viewModel.files = FileScanner.scan(rootURL: temp)
+        viewModel.refreshQuickActionsFast()
+
+        let categories = viewModel.quickActionsForDisplay.map(\.category)
+        let nonGeneral = categories.filter { $0 != "general" }
+        XCTAssertEqual(viewModel.quickActionsForDisplay.count, 3)
+        XCTAssertEqual(nonGeneral.count, 2)
+        XCTAssertEqual(categories.filter { $0 == "general" }.count, 1)
+    }
+
+    @MainActor
+    func testApplyQuickActionPrefillsComposerAndMentionState() throws {
+        let temp = try makeTempProject()
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let fileURL = temp.appendingPathComponent("notes.md")
+        try "hello".write(to: fileURL, atomically: true, encoding: .utf8)
+
+        let viewModel = AppViewModel()
+        viewModel.project = Project(id: "proj-qa-3", name: "proj-qa-3", rootPath: temp.path, createdAt: nil, lastOpenedAt: nil, activeConversationId: nil)
+        viewModel.projectRootURL = temp
+        viewModel.files = FileScanner.scan(rootURL: temp)
+        let beforeFocusToken = viewModel.composerFocusToken
+
+        let action = QuickActionItemPayload(
+            id: "qa-test",
+            label: "Test Action",
+            prompt: "Please review @notes.md and summarize.",
+            category: "general",
+            confidence: 0.5,
+            reason: "test"
+        )
+        viewModel.applyQuickAction(action)
+
+        XCTAssertEqual(viewModel.composerText, action.prompt)
+        XCTAssertEqual(viewModel.mentionedFilePaths, ["notes.md"])
+        XCTAssertEqual(viewModel.composerFocusToken, beforeFocusToken + 1)
+    }
+
+    @MainActor
+    func testQuickActionVisibilityTracksEmptyConversationState() {
+        let viewModel = AppViewModel()
+        XCTAssertTrue(viewModel.shouldShowQuickActionsInEmptyState)
+
+        viewModel.messages = [
+            Message(
+                id: "m-quick-1",
+                projectId: "p1",
+                conversationId: "c1",
+                role: "assistant",
+                content: "Hello",
+                parts: [],
+                parentMessageId: nil,
+                sequenceNo: 1,
+                createdAt: "2026-02-06T10:16:14+00:00"
+            )
+        ]
+        XCTAssertFalse(viewModel.shouldShowQuickActionsInEmptyState)
+    }
+
     func testMessageTimestampFormatting() {
         let message = Message(
             id: "m1",
@@ -246,5 +431,17 @@ final class WorkspaceCoreTests: XCTestCase {
     private func decodeMessageParts(from json: String) throws -> [MessagePart] {
         let data = Data(json.utf8)
         return try JSONDecoder().decode([MessagePart].self, from: data)
+    }
+
+    private func makeEvent(id: Int, type: String, payload: [String: JSONValue], runID: String? = nil) -> ProjectEvent {
+        ProjectEvent(
+            id: id,
+            type: type,
+            projectId: "p1",
+            conversationId: "c1",
+            runId: runID,
+            ts: "2026-02-06T12:00:00Z",
+            payload: payload
+        )
     }
 }

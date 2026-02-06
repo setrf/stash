@@ -325,6 +325,7 @@ private struct ChatPanel: View {
     @State private var runDetailsExpanded = false
     @State private var hideDoneInline = false
     @State private var doneRowGeneration = 0
+    @FocusState private var composerFocused: Bool
 
     private var shouldShowInlineRunRow: Bool {
         switch viewModel.runInlineState {
@@ -381,14 +382,18 @@ private struct ChatPanel: View {
             Divider()
 
             if viewModel.visibleMessages.isEmpty {
-                VStack(spacing: 10) {
-                    Text("Ask Stash to work on your files")
-                        .font(.system(size: 19, weight: .semibold))
-                        .foregroundStyle(CodexTheme.textPrimary)
-                    Text("Type what you want done and run it.")
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(CodexTheme.textSecondary)
+                VStack(spacing: 14) {
+                    VStack(spacing: 10) {
+                        Text("Ask Stash to work on your files")
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundStyle(CodexTheme.textPrimary)
+                        Text("Type what you want done and run it.")
+                            .font(.system(size: 13, weight: .regular))
+                            .foregroundStyle(CodexTheme.textSecondary)
+                    }
+                    QuickActionButtonRow(viewModel: viewModel)
                 }
+                .padding(.horizontal, 16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 MessageTimeline(
@@ -454,6 +459,7 @@ private struct ChatPanel: View {
                     .onChange(of: viewModel.composerText) {
                         viewModel.composerDidChange()
                     }
+                    .focused($composerFocused)
 
                 HStack {
                     Text(viewModel.runInProgress ? "Running..." : "Ready")
@@ -496,6 +502,67 @@ private struct ChatPanel: View {
                 runDetailsExpanded = false
             }
         }
+        .onChange(of: viewModel.composerFocusToken) {
+            composerFocused = true
+        }
+    }
+}
+
+private struct QuickActionButtonRow: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(viewModel.quickActionsForDisplay.prefix(3)) { action in
+                Button {
+                    viewModel.applyQuickAction(action)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: iconName(for: action.category))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(CodexTheme.accent)
+                        Text(action.label)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(CodexTheme.textPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                            .fill(Color.white)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                            .stroke(CodexTheme.borderSoft, lineWidth: CodexTheme.chatBorderLineWidth)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            if viewModel.quickActionsLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(CodexTheme.accent)
+            }
+        }
+        .frame(maxWidth: 360)
+    }
+
+    private func iconName(for category: String) -> String {
+        switch category {
+        case "legal":
+            return "doc.text"
+        case "accounting_hr_tax":
+            return "tray.full"
+        case "markets_finance":
+            return "chart.bar"
+        case "personal_budget":
+            return "creditcard"
+        default:
+            return "sparkles"
+        }
     }
 }
 
@@ -512,6 +579,18 @@ private struct RunInlineStatusRow: View {
                 .foregroundStyle(summaryColor)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+            if let progressBadge = viewModel.runProgressBadgeText, viewModel.runInlineState == .running {
+                Text(progressBadge)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(CodexTheme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: CodexTheme.chatInlineRadius)
+                            .fill(CodexTheme.panelSubtle)
+                    )
+            }
 
             if viewModel.runInlineState == .awaitingConfirmation {
                 Button("Discard") {
@@ -598,58 +677,39 @@ private struct RunDetailsDrawer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let preview = viewModel.runPlannerPreview, !preview.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Plan")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                    ScrollView {
-                        Text(preview)
-                            .font(.system(size: 11, weight: .regular, design: .monospaced))
-                            .foregroundStyle(CodexTheme.textPrimary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 120)
-                }
+            let milestones = viewModel.runFeedbackEvents.filter {
+                let type = $0.type.lowercased()
+                return type == "note" || type == "error" || type == "status" || type == "planning"
             }
-
-            if !viewModel.runTodos.isEmpty {
+            if !milestones.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Steps")
+                    Text("Milestones")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(CodexTheme.textSecondary)
-                    ForEach(viewModel.runTodos.prefix(8)) { todo in
-                        HStack(spacing: 6) {
-                            Image(systemName: todoIcon(for: todo.status))
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(todoColor(for: todo.status))
-                            Text(todo.title)
-                                .font(.system(size: 11, weight: .regular, design: .monospaced))
-                                .foregroundStyle(CodexTheme.textPrimary)
-                                .lineLimit(1)
+                    ForEach(milestones.suffix(8)) { event in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(event.timestamp)
+                                    .font(.system(size: 10, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(CodexTheme.textSecondary)
+                                Text(event.title)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(CodexTheme.textPrimary)
+                                    .lineLimit(1)
+                            }
+                            if let detail = event.detail, !detail.isEmpty {
+                                Text(detail)
+                                    .font(.system(size: 11, weight: .regular))
+                                    .foregroundStyle(CodexTheme.textSecondary)
+                                    .lineLimit(2)
+                            }
                         }
                     }
                 }
-            }
-
-            if !viewModel.runFeedbackEvents.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Events")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(CodexTheme.textSecondary)
-                    ForEach(viewModel.runFeedbackEvents.suffix(8)) { event in
-                        HStack(spacing: 6) {
-                            Text(event.timestamp)
-                                .font(.system(size: 10, weight: .regular, design: .monospaced))
-                                .foregroundStyle(CodexTheme.textSecondary)
-                            Text(event.title)
-                                .font(.system(size: 11, weight: .regular))
-                                .foregroundStyle(CodexTheme.textPrimary)
-                                .lineLimit(1)
-                        }
-                    }
-                }
+            } else {
+                Text("No milestones yet.")
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(CodexTheme.textSecondary)
             }
         }
         .padding(.horizontal, 10)
@@ -664,31 +724,6 @@ private struct RunDetailsDrawer: View {
         )
     }
 
-    private func todoIcon(for status: String) -> String {
-        switch status.lowercased() {
-        case "completed":
-            return "checkmark.circle.fill"
-        case "running":
-            return "clock.fill"
-        case "failed":
-            return "xmark.circle.fill"
-        default:
-            return "circle"
-        }
-    }
-
-    private func todoColor(for status: String) -> Color {
-        switch status.lowercased() {
-        case "completed":
-            return CodexTheme.success
-        case "running":
-            return CodexTheme.accent
-        case "failed":
-            return CodexTheme.danger
-        default:
-            return CodexTheme.textSecondary
-        }
-    }
 }
 
 private struct SetupRequiredCard: View {

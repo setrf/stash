@@ -30,6 +30,7 @@ from .schemas import (
     ProjectCreateRequest,
     ProjectPatchRequest,
     ProjectResponse,
+    QuickActionsResponse,
     RunResponse,
     RuntimeConfigResponse,
     RuntimeConfigUpdateRequest,
@@ -420,6 +421,20 @@ def create_app(services: Services) -> FastAPI:
             finished_at=job.finished_at,
             detail=job.detail,
         )
+
+    @app.get("/v1/projects/{project_id}/quick-actions", response_model=QuickActionsResponse)
+    async def quick_actions(
+        project_id: str,
+        limit: int = Query(default=3, ge=1, le=6),
+    ) -> QuickActionsResponse:
+        context, repo = _repo_or_404(services, project_id)
+        payload = await asyncio.to_thread(
+            services.quick_actions.suggest,
+            context=context,
+            repo=repo,
+            limit=limit,
+        )
+        return QuickActionsResponse(**payload)
 
     @app.post("/v1/projects/{project_id}/search", response_model=SearchResponse)
     async def search(project_id: str, request: SearchRequest) -> SearchResponse:

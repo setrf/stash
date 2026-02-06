@@ -589,6 +589,31 @@ class Planner:
 
         return None
 
+    def classify_quick_actions(self, *, prompt: str, timeout_seconds: int = 12) -> str | None:
+        runtime = self._runtime_config()
+        capped_timeout = max(3, min(int(timeout_seconds), 120))
+        runtime.openai_timeout_seconds = max(5, min(runtime.openai_timeout_seconds, capped_timeout))
+
+        backend_order = ["codex", "openai"]
+        if runtime.planner_backend == "openai_api":
+            backend_order = ["openai", "codex"]
+
+        for backend in backend_order:
+            text: str | None = None
+            if backend == "openai":
+                text = self._run_openai_text_prompt(prompt=prompt, runtime=runtime)
+            else:
+                text = self._run_codex_text_prompt(
+                    prompt=prompt,
+                    runtime=runtime,
+                    project_summary={"root_path": "."},
+                    timeout_seconds=capped_timeout,
+                    attempt_label="quick_actions",
+                )
+            if text and text.strip():
+                return text.strip()
+        return None
+
     def _build_planner_prompt(
         self,
         *,
